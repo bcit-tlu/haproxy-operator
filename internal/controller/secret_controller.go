@@ -156,6 +156,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	secret.Annotations[LastAppliedHashAnnotation] = currentHash
 	secret.Annotations[StatusAnnotation] = "Applied"
 	secret.Annotations["haproxy.operator/last-applied-time"] = time.Now().Format(time.RFC3339)
+	delete(secret.Annotations, LastFailedHashAnnotation)
 
 	if err := r.Update(ctx, secret); err != nil {
 		log.Error(err, "failed to update Secret annotations")
