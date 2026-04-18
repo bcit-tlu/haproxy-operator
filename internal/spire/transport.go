@@ -38,11 +38,15 @@ import (
 // from the Workload API for mTLS. The returned transport automatically
 // rotates certificates when the SPIRE Agent issues new SVIDs.
 //
+// Both client certificates (via GetClientCertificate) and trust bundle
+// verification (via VerifyPeerCertificate) are resolved dynamically on
+// each TLS handshake, so CA rotation is handled correctly.
+//
 // socketPath is the SPIRE Agent Workload API socket, typically:
 //
 //	unix:///run/spire/agent.sock
 //
-// The caller should close the returned x509Source when the operator shuts down.
+// The caller must close the returned X509Source when the operator shuts down.
 func TLSTransport(ctx context.Context, socketPath string) (http.RoundTripper, *workloadapi.X509Source, error) {
 	source, err := workloadapi.NewX509Source(ctx, workloadapi.WithClientOptions(
 		workloadapi.WithAddr(socketPath),
@@ -67,18 +71,12 @@ func TLSTransport(ctx context.Context, socketPath string) (http.RoundTripper, *w
 				}
 				return &cert, nil
 			},
-			RootCAs: bundleToPool(source),
-			// Verify the server's SPIFFE ID. In production this should be
-			// locked down to the specific SPIFFE ID of the HAProxy service:
-			//   spiffe://trust-domain/haproxy-dataplane
-			// For now we accept any SVID from the same trust domain, which
-			// the SPIRE Agent enforces.
-			InsecureSkipVerify: false,
+			// Skip the standard RootCAs verification — we handle it
+			// dynamically in VerifyPeerCertificate below so that CA
+			// rotation is picked up without restarting the operator.
+			InsecureSkipVerify: true, //nolint:gosec // verified in VerifyPeerCertificate
 			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-				// Trust is established via the SPIFFE trust bundle; this
-				// callback is a hook for future SPIFFE ID allowlisting.
-				_ = rawCerts
-				return nil
+				return verifyServerCert(source, rawCerts)
 			},
 		},
 	}
@@ -86,24 +84,50 @@ func TLSTransport(ctx context.Context, socketPath string) (http.RoundTripper, *w
 	return transport, source, nil
 }
 
-// bundleToPool converts the SPIFFE trust bundle from the X509Source into
-// an *x509.CertPool suitable for TLS verification.
-func bundleToPool(source *workloadapi.X509Source) *x509.CertPool {
+// verifyServerCert dynamically verifies the server certificate against the
+// current SPIFFE trust bundle from the X509Source. This ensures that trust
+// bundle rotations are picked up on every TLS handshake.
+func verifyServerCert(source *workloadapi.X509Source, rawCerts [][]byte) error {
+	if len(rawCerts) == 0 {
+		return fmt.Errorf("server presented no certificates")
+	}
+
 	svid, err := source.GetX509SVID()
 	if err != nil {
-		pool, _ := x509.SystemCertPool()
-		return pool
+		return fmt.Errorf("get SVID for trust domain: %w", err)
 	}
+
 	bundle, err := source.GetX509BundleForTrustDomain(svid.ID.TrustDomain())
 	if err != nil {
-		// Fallback: use system cert pool if bundle retrieval fails.
-		pool, _ := x509.SystemCertPool()
-		return pool
+		return fmt.Errorf("get trust bundle: %w", err)
 	}
 
 	pool := x509.NewCertPool()
-	for _, cert := range bundle.X509Authorities() {
-		pool.AddCert(cert)
+	for _, ca := range bundle.X509Authorities() {
+		pool.AddCert(ca)
 	}
-	return pool
+
+	leaf, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return fmt.Errorf("parse server leaf certificate: %w", err)
+	}
+
+	intermediates := x509.NewCertPool()
+	for _, raw := range rawCerts[1:] {
+		cert, err := x509.ParseCertificate(raw)
+		if err != nil {
+			continue
+		}
+		intermediates.AddCert(cert)
+	}
+
+	_, err = leaf.Verify(x509.VerifyOptions{
+		Roots:         pool,
+		Intermediates: intermediates,
+	})
+	if err != nil {
+		return fmt.Errorf("server certificate verification failed: %w", err)
+	}
+
+	return nil
 }

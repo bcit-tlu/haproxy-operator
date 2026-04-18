@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +22,7 @@ import (
 	"github.com/bcit-tlu/haproxy-operator/internal/haproxy"
 	"github.com/bcit-tlu/haproxy-operator/internal/spire"
 	"github.com/bcit-tlu/haproxy-operator/internal/status"
+	"github.com/spiffe/go-spiffe/v2/workloadapi"
 )
 
 const (
@@ -47,6 +49,14 @@ type SecretReconciler struct {
 	APIConfig       haproxy.APIConfig
 	SpireSocketPath string
 	Recorder        record.EventRecorder
+
+	// haproxyClient is created once (lazily) and reused across reconciliations.
+	haproxyClient *haproxy.Client
+	// spireSource holds the SPIRE X509Source for lifecycle management.
+	// It is created once and closed on shutdown via the manager Runnable.
+	spireSource *workloadapi.X509Source
+	clientOnce  sync.Once
+	clientErr   error
 }
 
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;update;patch
@@ -85,9 +95,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	rawConfig := string(configData)
 
-	// Build the Dataplane API client. When SPIRE is configured, obtain mTLS
-	// credentials from the Workload API; otherwise fall back to file-based certs.
-	haproxyClient, err := r.buildClient(ctx)
+	haproxyClient, err := r.getOrCreateClient(ctx)
 	if err != nil {
 		log.Error(err, "failed to create dataplane client")
 		return r.updateStatus(ctx, secret, "ConfigError", err.Error())
@@ -116,8 +124,8 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	log.Info("configuration validated, applying to HAProxy")
 	status.EmitEvent(r.Recorder, secret, status.ValidationPassed, "")
 
-	// Phase 2: Apply validated configuration.
-	if err := haproxyClient.ApplyRawConfiguration(ctx, rawConfig); err != nil {
+	// Phase 2: Apply already-validated configuration (skip redundant validation).
+	if err := haproxyClient.ApplyRawConfigurationValidated(ctx, rawConfig); err != nil {
 		log.Error(err, "failed to apply configuration to HAProxy")
 		status.EmitEvent(r.Recorder, secret, status.ApplyFailed, err.Error())
 		return r.updateStatus(ctx, secret, "ApplyError", err.Error())
@@ -143,21 +151,33 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 }
 
-// buildClient constructs a Dataplane API client. If a SPIRE socket path is
-// configured, it uses SVID-based mTLS; otherwise it uses the static cert paths.
-func (r *SecretReconciler) buildClient(ctx context.Context) (*haproxy.Client, error) {
-	if r.SpireSocketPath != "" {
-		transport, source, err := spire.TLSTransport(ctx, r.SpireSocketPath)
-		if err != nil {
-			return nil, fmt.Errorf("SPIRE transport: %w", err)
+// getOrCreateClient lazily initializes the Dataplane API client once and
+// reuses it across all reconciliations. When SPIRE is configured, the
+// X509Source is stored on the reconciler for proper lifecycle management.
+func (r *SecretReconciler) getOrCreateClient(ctx context.Context) (*haproxy.Client, error) {
+	r.clientOnce.Do(func() {
+		if r.SpireSocketPath != "" {
+			transport, source, err := spire.TLSTransport(ctx, r.SpireSocketPath)
+			if err != nil {
+				r.clientErr = fmt.Errorf("SPIRE transport: %w", err)
+				return
+			}
+			r.spireSource = source
+			r.haproxyClient, r.clientErr = haproxy.NewClientWithTransport(r.APIConfig, transport)
+			return
 		}
-		// The source is long-lived and rotates automatically. In a production
-		// deployment we would store it on the reconciler and close it on
-		// shutdown. For the skeleton this is acceptable.
-		_ = source
-		return haproxy.NewClientWithTransport(r.APIConfig, transport)
+		r.haproxyClient, r.clientErr = haproxy.NewClient(r.APIConfig)
+	})
+	return r.haproxyClient, r.clientErr
+}
+
+// Close releases resources held by the reconciler (SPIRE X509Source).
+// It is registered as a manager Runnable in SetupWithManager.
+func (r *SecretReconciler) Close() error {
+	if r.spireSource != nil {
+		return r.spireSource.Close()
 	}
-	return haproxy.NewClient(r.APIConfig)
+	return nil
 }
 
 func isRelevantUpdate(oldSecret, newSecret *corev1.Secret) bool {
@@ -218,11 +238,28 @@ func (r *SecretReconciler) updateStatus(ctx context.Context, secret *corev1.Secr
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
+// spireSourceCloser implements manager.Runnable to close the SPIRE X509Source
+// when the manager context is cancelled (operator shutdown).
+type spireSourceCloser struct {
+	reconciler *SecretReconciler
+}
+
+func (c *spireSourceCloser) Start(ctx context.Context) error {
+	<-ctx.Done()
+	return c.reconciler.Close()
+}
+
 // SetupWithManager registers the controller with the manager.
 func (r *SecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Recorder == nil {
 		r.Recorder = mgr.GetEventRecorderFor("haproxy-operator")
 	}
+
+	// Register a Runnable that closes the SPIRE source on shutdown.
+	if err := mgr.Add(&spireSourceCloser{reconciler: r}); err != nil {
+		return fmt.Errorf("register SPIRE source closer: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Secret{}).
 		WithEventFilter(predicate.Funcs{

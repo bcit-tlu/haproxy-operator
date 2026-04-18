@@ -135,6 +135,20 @@ func (c *Client) ApplyRawConfiguration(ctx context.Context, raw string) error {
 	if err := c.ValidateRawConfiguration(ctx, raw); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
+	return c.applyRaw(ctx, raw)
+}
+
+// ApplyRawConfigurationValidated pushes raw haproxy.cfg content that has
+// already been validated by the caller. This avoids a redundant validation
+// round-trip when the reconciler has already called ValidateRawConfiguration.
+func (c *Client) ApplyRawConfigurationValidated(ctx context.Context, raw string) error {
+	if err := c.waitForReady(ctx, 10*time.Second); err != nil {
+		return fmt.Errorf("dataplane api not ready: %w", err)
+	}
+	return c.applyRaw(ctx, raw)
+}
+
+func (c *Client) applyRaw(ctx context.Context, raw string) error {
 	ver, err := c.getConfigVersion(ctx)
 	if err != nil {
 		return err
