@@ -1,0 +1,6 @@
+apiVersion: v2
+name: haproxy-operator
+description: Kubernetes operator that reconciles HAProxy configuration via the Dataplane API
+version: 0.1.0 # x-release-please-version
+appVersion: "0.1.0" # x-release-please-version
+type: application

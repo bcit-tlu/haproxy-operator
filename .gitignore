@@ -1,0 +1,27 @@
+# Build outputs
+bin/
+dist/
+build/
+
+# OS artifacts
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+vendor/
+
+# K3s data and kubeconfig (docker-compose dev)
+k3s-server/
+dev/.k3s/
+
+# Generated mTLS artifacts for local docker-compose runs
+dev/.certs/
+!dev/.certs/.gitkeep
+
+# direnv local overrides
+.envrc.local

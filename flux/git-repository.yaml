@@ -1,0 +1,19 @@
+# FluxCD GitRepository – watches the private config repo for haproxy.cfg changes.
+# The secretRef points to a K8s Secret containing a GitHub PAT or deploy key
+# with read access to the config repository.
+#
+# For the "latest" environment, set spec.ref.branch to "main".
+# For the "stable" environment, set spec.ref.branch to "release" or use tags.
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: haproxy-config
+  namespace: haproxy-operator
+spec:
+  interval: 1m
+  url: https://github.com/bcit-tlu/haproxy-configs  # CHANGEME: your private config repo
+  ref:
+    branch: main  # "latest" env; change to "release" for stable
+  secretRef:
+    name: haproxy-config-git-auth  # K8s Secret with GitHub credentials

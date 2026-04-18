@@ -1,0 +1,75 @@
+# Local development environment.
+# Usage: docker compose up --build
+#
+# Starts HAProxy with Dataplane API, the operator in local mode, and sample
+# backend services. The operator watches dev/external-haproxy-service/haproxy.cfg
+# and pushes changes via the Dataplane API.
+
+services:
+  haproxy:
+    image: haproxytech/haproxy-alpine:3.0
+    hostname: haproxy
+    ports:
+      - "8080:80"       # HTTP frontend
+      - "8443:443"      # HTTPS frontend
+      - "5555:5555"     # Dataplane API
+      - "8404:8404"     # Stats/Metrics
+    volumes:
+      - ./dev/external-haproxy-service/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg
+    environment:
+      - HAPROXY_DATAPLANEAPI_USER=admin
+      - HAPROXY_DATAPLANEAPI_PASS=adminpwd
+    networks:
+      - haproxy-net
+    restart: unless-stopped
+
+  operator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - MODE=local
+      - DATAPLANE_URL=http://haproxy:5555/v3
+      - DATAPLANE_USERNAME=admin
+      - DATAPLANE_PASSWORD=adminpwd
+      - LOCAL_CONFIG_PATH=/app/haproxy.cfg
+      - LOCAL_WATCH=true
+    volumes:
+      - ./dev/external-haproxy-service/haproxy.cfg:/app/haproxy.cfg:ro
+    depends_on:
+      - haproxy
+    networks:
+      - haproxy-net
+    restart: unless-stopped
+
+  backend-1:
+    image: nginx:alpine
+    hostname: backend-1
+    networks:
+      haproxy-net:
+        ipv4_address: 172.20.0.11
+    restart: unless-stopped
+
+  backend-2:
+    image: nginx:alpine
+    hostname: backend-2
+    networks:
+      haproxy-net:
+        ipv4_address: 172.20.0.12
+    restart: unless-stopped
+
+  backend-3:
+    image: nginx:alpine
+    hostname: backend-3
+    networks:
+      haproxy-net:
+        ipv4_address: 172.20.0.13
+    restart: unless-stopped
+
+networks:
+  haproxy-net:
+    name: haproxy-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
