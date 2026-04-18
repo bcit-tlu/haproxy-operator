@@ -29,6 +29,10 @@ const (
 	// LastAppliedHashAnnotation stores the SHA256 of the last successfully applied config.
 	LastAppliedHashAnnotation = "haproxy.operator/last-applied-hash"
 
+	// LastFailedHashAnnotation stores the SHA256 of the last config that failed
+	// validation, so the reconciler skips re-validation until the config changes.
+	LastFailedHashAnnotation = "haproxy.operator/last-failed-hash"
+
 	// StatusAnnotation records the reconciliation status on the Secret.
 	StatusAnnotation = "haproxy.operator/status"
 
@@ -109,6 +113,12 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 	}
 
+	// Skip re-validation for configs that already failed — wait for a new Flux sync.
+	if currentHash == secret.Annotations[LastFailedHashAnnotation] {
+		log.Info("configuration previously failed validation, skipping until changed")
+		return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+	}
+
 	log.Info("configuration changed, validating",
 		"currentHash", currentHash,
 		"lastAppliedHash", lastAppliedHash)
@@ -118,6 +128,11 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err := validator.Validate(ctx, rawConfig); err != nil {
 		log.Error(err, "configuration validation failed — rejecting")
 		status.EmitEvent(r.Recorder, secret, status.ValidationFailed, err.Error())
+		// Record the failed hash so we don't retry until the config changes.
+		if secret.Annotations == nil {
+			secret.Annotations = make(map[string]string)
+		}
+		secret.Annotations[LastFailedHashAnnotation] = currentHash
 		return r.updateStatus(ctx, secret, "ValidationFailed", err.Error())
 	}
 
@@ -245,6 +260,9 @@ func (r *SecretReconciler) updateStatus(ctx context.Context, secret *corev1.Secr
 		secret.Annotations = make(map[string]string)
 	}
 	secret.Annotations[StatusAnnotation] = statusVal
+	if message != "" {
+		secret.Annotations["haproxy.operator/status-message"] = message
+	}
 	secret.Annotations["haproxy.operator/last-update-time"] = time.Now().Format(time.RFC3339)
 
 	if err := r.Update(ctx, secret); err != nil {
