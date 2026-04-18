@@ -119,7 +119,11 @@ func (c *Client) waitForReady(ctx context.Context, timeout time.Duration) error 
 			return nil
 		}
 		lastErr = err
-		time.Sleep(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("dataplane api not ready")

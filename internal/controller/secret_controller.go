@@ -50,13 +50,13 @@ type SecretReconciler struct {
 	SpireSocketPath string
 	Recorder        record.EventRecorder
 
-	// haproxyClient is created once (lazily) and reused across reconciliations.
+	// haproxyClient is created lazily and reused across reconciliations.
 	haproxyClient *haproxy.Client
 	// spireSource holds the SPIRE X509Source for lifecycle management.
 	// It is created once and closed on shutdown via the manager Runnable.
 	spireSource *workloadapi.X509Source
-	clientOnce  sync.Once
-	clientErr   error
+	clientMu    sync.Mutex
+	clientReady bool
 }
 
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;update;patch
@@ -151,24 +151,41 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 }
 
-// getOrCreateClient lazily initializes the Dataplane API client once and
-// reuses it across all reconciliations. When SPIRE is configured, the
-// X509Source is stored on the reconciler for proper lifecycle management.
+// getOrCreateClient lazily initializes the Dataplane API client and reuses it
+// across all reconciliations. If initialization fails (e.g. SPIRE agent not
+// yet ready), subsequent calls will retry rather than permanently caching
+// the error.
 func (r *SecretReconciler) getOrCreateClient(ctx context.Context) (*haproxy.Client, error) {
-	r.clientOnce.Do(func() {
-		if r.SpireSocketPath != "" {
-			transport, source, err := spire.TLSTransport(ctx, r.SpireSocketPath)
-			if err != nil {
-				r.clientErr = fmt.Errorf("SPIRE transport: %w", err)
-				return
-			}
-			r.spireSource = source
-			r.haproxyClient, r.clientErr = haproxy.NewClientWithTransport(r.APIConfig, transport)
-			return
+	r.clientMu.Lock()
+	defer r.clientMu.Unlock()
+
+	if r.clientReady {
+		return r.haproxyClient, nil
+	}
+
+	var (
+		c   *haproxy.Client
+		err error
+	)
+
+	if r.SpireSocketPath != "" {
+		transport, source, tErr := spire.TLSTransport(ctx, r.SpireSocketPath)
+		if tErr != nil {
+			return nil, fmt.Errorf("SPIRE transport: %w", tErr)
 		}
-		r.haproxyClient, r.clientErr = haproxy.NewClient(r.APIConfig)
-	})
-	return r.haproxyClient, r.clientErr
+		r.spireSource = source
+		c, err = haproxy.NewClientWithTransport(r.APIConfig, transport)
+	} else {
+		c, err = haproxy.NewClient(r.APIConfig)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	r.haproxyClient = c
+	r.clientReady = true
+	return r.haproxyClient, nil
 }
 
 // Close releases resources held by the reconciler (SPIRE X509Source).
@@ -226,10 +243,6 @@ func (r *SecretReconciler) updateStatus(ctx context.Context, secret *corev1.Secr
 	}
 	secret.Annotations[StatusAnnotation] = statusVal
 	secret.Annotations["haproxy.operator/last-update-time"] = time.Now().Format(time.RFC3339)
-
-	if r.Recorder != nil {
-		r.Recorder.Eventf(secret, corev1.EventTypeWarning, statusVal, "%s", message)
-	}
 
 	if err := r.Update(ctx, secret); err != nil {
 		return ctrl.Result{}, err
