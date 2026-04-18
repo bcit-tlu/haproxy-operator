@@ -78,6 +78,10 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	if err := w.Add(r.CfgPath); err != nil {
 		_ = w.Add(dirOf(r.CfgPath))
+	} else {
+		// Also watch the directory so that atomic renames (vim, sed -i, etc.)
+		// are detected — inotify tracks inodes, not paths.
+		_ = w.Add(dirOf(r.CfgPath))
 	}
 
 	for {

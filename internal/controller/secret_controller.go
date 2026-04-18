@@ -173,14 +173,17 @@ func (r *SecretReconciler) getOrCreateClient(ctx context.Context) (*haproxy.Clie
 		if tErr != nil {
 			return nil, fmt.Errorf("SPIRE transport: %w", tErr)
 		}
-		r.spireSource = source
 		c, err = haproxy.NewClientWithTransport(r.APIConfig, transport)
+		if err != nil {
+			source.Close()
+			return nil, err
+		}
+		r.spireSource = source
 	} else {
 		c, err = haproxy.NewClient(r.APIConfig)
-	}
-
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	r.haproxyClient = c

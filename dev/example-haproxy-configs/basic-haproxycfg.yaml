@@ -37,11 +37,11 @@ stringData:
       stats uri /
       stats enable
 
-      backend backend_cluster
-        mode http
-        balance roundrobin
-        option httpchk GET /
-        default-server inter 10s rise 2 fall 3
-        server backend-1 172.20.0.11:80 check
-        server backend-2 172.20.0.12:80 check
-        server backend-3 172.20.0.13:80 check
+    backend backend_cluster
+      mode http
+      balance roundrobin
+      option httpchk GET /
+      default-server inter 10s rise 2 fall 3
+      server backend-1 172.20.0.11:80 check
+      server backend-2 172.20.0.12:80 check
+      server backend-3 172.20.0.13:80 check
