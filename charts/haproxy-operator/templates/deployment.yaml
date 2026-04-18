@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "haproxy-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "haproxy-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "haproxy-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "haproxy-operator.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "haproxy-operator.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: {{ include "haproxy-operator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          args:
+            - --mode=k8s
+            - --namespace={{ .Values.watchNamespace }}
+            - --secret-name={{ .Values.secretName }}
+            - --secret-key={{ .Values.secretKey }}
+            - --dataplane-url={{ .Values.dataplane.url }}
+            {{- if .Values.dataplane.insecure }}
+            - --dataplane-insecure=true
+            {{- end }}
+            {{- if not .Values.spire.enabled }}
+            - --dataplane-ca-cert={{ .Values.dataplane.caCertPath }}
+            - --dataplane-client-cert={{ .Values.dataplane.clientCertPath }}
+            - --dataplane-client-key={{ .Values.dataplane.clientKeyPath }}
+            {{- end }}
+            {{- if .Values.spire.enabled }}
+            - --spire-socket={{ .Values.spire.socketPath }}
+            {{- end }}
+            {{- if .Values.leaderElection.enabled }}
+            - --leader-elect=true
+            {{- end }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            - --health-probe-bind-address=:{{ .Values.probes.port }}
+          {{- if .Values.dataplane.auth.secretName }}
+          env:
+            - name: DATAPLANE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dataplane.auth.secretName }}
+                  key: {{ .Values.dataplane.auth.usernameKey }}
+            - name: DATAPLANE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dataplane.auth.secretName }}
+                  key: {{ .Values.dataplane.auth.passwordKey }}
+          {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            - name: probes
+              containerPort: {{ .Values.probes.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- if not .Values.spire.enabled }}
+            - name: tls
+              mountPath: /etc/haproxy-operator/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.spire.enabled }}
+            - name: spire-agent-socket
+              mountPath: /run/spire
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if not .Values.spire.enabled }}
+        - name: tls
+          secret:
+            {{- if .Values.vault.enabled }}
+            secretName: {{ .Values.vault.pki.secretName }}
+            {{- else }}
+            secretName: haproxy-operator-tls
+            {{- end }}
+        {{- end }}
+        {{- if .Values.spire.enabled }}
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire
+            type: DirectoryOrCreate
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.zoneAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "haproxy-operator.selectorLabels" . | nindent 20 }}
+                topologyKey: {{ .Values.zoneAntiAffinity.topologyKey }}
+      {{- end }}

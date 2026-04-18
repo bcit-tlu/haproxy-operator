@@ -1,0 +1,84 @@
+# Default values for haproxy-operator.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/bcit-tlu/haproxy-operator/haproxy-operator
+  pullPolicy: IfNotPresent
+  tag: "" # Overridden by appVersion
+
+serviceAccount:
+  create: true
+  name: haproxy-operator
+
+# Namespace the operator watches for the haproxy-config Secret.
+watchNamespace: haproxy-operator
+
+# Name of the K8s Secret containing haproxy.cfg (synced by Flux).
+secretName: haproxy-config
+secretKey: haproxy.cfg
+
+# HAProxy Dataplane API connection.
+dataplane:
+  url: "https://haproxy:5555/v3"
+  insecure: false
+  # Paths inside the pod where certs are mounted (by VSO or SPIRE).
+  caCertPath: /etc/haproxy-operator/tls/ca.crt
+  clientCertPath: /etc/haproxy-operator/tls/tls.crt
+  clientKeyPath: /etc/haproxy-operator/tls/tls.key
+  # Basic auth credentials (optional, from a Secret).
+  auth:
+    secretName: ""
+    usernameKey: username
+    passwordKey: password
+
+# SPIFFE/SPIRE integration. When enabled, mTLS credentials are obtained
+# from the SPIRE Agent Workload API instead of static cert files.
+spire:
+  enabled: false
+  socketPath: "unix:///run/spire/agent.sock"
+
+# Vault Secrets Operator (VSO) integration.
+# Creates VaultStaticSecret / VaultPKISecret CRs that sync certs into K8s Secrets.
+vault:
+  enabled: false
+  # VaultAuth CR name (created by flux-fleet base manifests).
+  authRef: vault-auth
+  pki:
+    mount: pki-sica-v2
+    role: pki
+    commonName: haproxy-operator.tlu.bcit.ca
+    ttl: 72h
+    # Secret name where VSO writes the issued certificate.
+    secretName: haproxy-operator-tls
+  static:
+    # For Dataplane API basic-auth credentials stored in Vault KV.
+    enabled: false
+    mount: tlu-infrastructure
+    path: haproxy-operator/dataplane-credentials
+    secretName: haproxy-operator-dataplane-auth
+
+leaderElection:
+  enabled: true
+
+metrics:
+  port: 9090
+
+probes:
+  port: 8081
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Zone anti-affinity for cross-datacenter HA (matches org pattern).
+zoneAntiAffinity:
+  enabled: false
+  topologyKey: topology.kubernetes.io/zone
+
+nodeSelector: {}
+tolerations: []
