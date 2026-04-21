@@ -29,6 +29,7 @@ permissions:
   packages: write
   id-token: write          # Cosign keyless (Sigstore OIDC)
   security-events: write   # Trivy SARIF upload to GitHub Security tab
+  actions: read            # Required by codeql-action/upload-sarif on private repos
 
 jobs:
   # ── Quality gates ─────────────────────────────────────────
@@ -250,6 +251,7 @@ jobs:
       - name: Upload scan results to GitHub Security
         if: needs.versions.outputs.mode == 'head' || needs.versions.outputs.mode == 'release'
         uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true   # Non-critical: don't block chart publish on telemetry upload
         with:
           sarif_file: trivy.sarif
           category: trivy
