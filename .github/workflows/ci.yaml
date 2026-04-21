@@ -29,6 +29,7 @@ permissions:
   packages: write
   id-token: write          # Cosign keyless (Sigstore OIDC)
   security-events: write   # Trivy SARIF upload to GitHub Security tab
+  actions: read            # Required by codeql-action/upload-sarif on private repos
 
 jobs:
   # ── Quality gates ─────────────────────────────────────────
@@ -248,11 +249,18 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Upload scan results to GitHub Security
+        id: upload-sarif
         if: needs.versions.outputs.mode == 'head' || needs.versions.outputs.mode == 'release'
         uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true   # Never block chart publish on Security-tab upload
         with:
           sarif_file: trivy.sarif
           category: trivy
+
+      - name: Surface SARIF upload failure
+        if: steps.upload-sarif.outcome == 'failure'
+        run: |
+          echo "::warning title=Trivy SARIF upload failed::Scan results did NOT reach the GitHub Security tab for this run. Inspect the 'Upload scan results to GitHub Security' step above. The image was still built, pushed, signed, and scanned locally."
 
   # ── Helm chart → OCI registry ────────────────────────────
   #
