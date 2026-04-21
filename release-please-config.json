@@ -13,7 +13,10 @@
       "release-as": "0.3.0",
       "prerelease": false,
       "extra-files": [
-        "charts/haproxy-operator/Chart.yaml"
+        {
+          "type": "generic",
+          "path": "charts/haproxy-operator/Chart.yaml"
+        }
       ]
     }
   }
