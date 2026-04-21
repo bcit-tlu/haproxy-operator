@@ -51,6 +51,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Full history + tags needed for the highest-stable computation
+          # in the "Promote graduated release" step below.
+          fetch-depth: 0
 
       - name: Ensure ci.yaml has a workflow_dispatch trigger
         run: |
@@ -71,3 +75,51 @@ jobs:
           fi
           echo "Dispatching ci.yaml on tag ref: ${TAG}"
           gh workflow run ci.yaml --ref "${TAG}"
+
+      # ── Promote graduated releases from Pre-release → Latest ────
+      #
+      # release-please-config.json sets repo-level `"prerelease": true`,
+      # which makes release-please mark EVERY GitHub release it creates
+      # (rc AND graduated full-release) with prerelease=true. That is
+      # correct for rc tags (vX.Y.Z-rcN) but wrong for graduated stable
+      # tags (vX.Y.Z), which should appear as full releases in the
+      # GitHub UI and — iff this is the highest stable semver — as
+      # "Latest release".
+      #
+      # We fix this after the fact: whenever the just-created tag has
+      # no prerelease suffix (no `-` in the version), flip the GitHub
+      # release's `prerelease` flag to false and, iff this is the
+      # highest stable semver, set it as the repo's "Latest release".
+      # This mirrors the OCI-publish logic in ci.yaml's `versions` job
+      # exactly (same tag glob, same `-`-filter, same `sort -V | tail`),
+      # so the GitHub release's "Latest" flag tracks the image/chart
+      # `:latest` pointer.
+      - name: Promote graduated release to full release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TAG}" ]]; then
+            echo "::warning::release-please reported a release but no tag_name output; skipping promote"
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          if [[ "${VERSION}" == *-* ]]; then
+            echo "Tag ${TAG} is a prerelease (contains '-'); leaving GitHub release flags as-is."
+            exit 0
+          fi
+
+          HIGHEST_STABLE=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" \
+            | grep -v -- '-' \
+            | sed "s/^v//" \
+            | sort -V \
+            | tail -n1)
+
+          if [[ "${VERSION}" == "${HIGHEST_STABLE}" ]]; then
+            echo "Promoting ${TAG}: prerelease=false, latest=true (highest stable)."
+            gh release edit "${TAG}" --prerelease=false --latest=true
+          else
+            echo "Promoting ${TAG}: prerelease=false, latest=false (backport below highest stable ${HIGHEST_STABLE})."
+            gh release edit "${TAG}" --prerelease=false --latest=false
+          fi
