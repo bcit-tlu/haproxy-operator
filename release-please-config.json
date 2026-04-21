@@ -11,11 +11,7 @@
       "release-type": "simple",
       "component": "haproxy-operator",
       "extra-files": [
-        {
-          "type": "yaml",
-          "path": "charts/haproxy-operator/Chart.yaml",
-          "jsonpath": "$.appVersion"
-        }
+        "charts/haproxy-operator/Chart.yaml"
       ]
     }
   }
