@@ -10,6 +10,8 @@
     ".": {
       "release-type": "simple",
       "component": "haproxy-operator",
+      "release-as": "0.3.0",
+      "prerelease": false,
       "extra-files": [
         "charts/haproxy-operator/Chart.yaml"
       ]
