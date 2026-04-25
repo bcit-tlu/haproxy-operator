@@ -1,24 +1,32 @@
 # Local development environment.
 # Usage: docker compose up --build
 #
-# Starts HAProxy with Dataplane API, the operator in local mode, and sample
-# backend services. The operator watches dev/external-haproxy-service/haproxy.cfg
-# and pushes changes via the Dataplane API.
+# Starts HAProxy + Data Plane API, the operator in local mode, and sample
+# backends with distinct pages so round-robin behavior is visible.
 
 services:
   haproxy:
-    image: haproxytech/haproxy-alpine:3.0
+    image: haproxytech/haproxy-alpine:s6-3.0
     hostname: haproxy
     ports:
-      - "8080:80"       # HTTP frontend
-      - "8443:443"      # HTTPS frontend
-      - "5555:5555"     # Dataplane API
-      - "8404:8404"     # Stats/Metrics
+      - "8080:80" # HTTP frontend
+      - "8443:443" # HTTPS frontend
+      - "5555:5555" # Data Plane API
+      - "8404:8404" # Stats/Metrics
     volumes:
-      - ./dev/external-haproxy-service/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg
-    environment:
-      - HAPROXY_DATAPLANEAPI_USER=admin
-      - HAPROXY_DATAPLANEAPI_PASS=adminpwd
+      # Mount full HAProxy config directory so dataplaneapi can read/write
+      # dataplaneapi.yml, haproxy.cfg, transactions, and backups as needed.
+      - ./dev/external-haproxy-service:/usr/local/etc/haproxy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - --header='Authorization: Basic ZHBhcGk6bG9jYWxwd2QxMjM=' http://127.0.0.1:5555/v3/services/haproxy/configuration/version >/dev/null 2>&1",
+        ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
     networks:
       - haproxy-net
     restart: unless-stopped
@@ -30,14 +38,15 @@ services:
     environment:
       - MODE=local
       - DATAPLANE_URL=http://haproxy:5555/v3
-      - DATAPLANE_USERNAME=admin
-      - DATAPLANE_PASSWORD=adminpwd
+      - DATAPLANE_USERNAME=dpapi
+      - DATAPLANE_PASSWORD=localpwd123
       - LOCAL_CONFIG_PATH=/app/haproxy.cfg
       - LOCAL_WATCH=true
     volumes:
       - ./dev/external-haproxy-service/haproxy.cfg:/app/haproxy.cfg:ro
     depends_on:
-      - haproxy
+      haproxy:
+        condition: service_healthy
     networks:
       - haproxy-net
     restart: unless-stopped
@@ -45,6 +54,8 @@ services:
   backend-1:
     image: nginx:alpine
     hostname: backend-1
+    volumes:
+      - ./dev/backends/backend-1/index.html:/usr/share/nginx/html/index.html:ro
     networks:
       haproxy-net:
         ipv4_address: 172.20.0.11
@@ -53,6 +64,8 @@ services:
   backend-2:
     image: nginx:alpine
     hostname: backend-2
+    volumes:
+      - ./dev/backends/backend-2/index.html:/usr/share/nginx/html/index.html:ro
     networks:
       haproxy-net:
         ipv4_address: 172.20.0.12
@@ -61,6 +74,8 @@ services:
   backend-3:
     image: nginx:alpine
     hostname: backend-3
+    volumes:
+      - ./dev/backends/backend-3/index.html:/usr/share/nginx/html/index.html:ro
     networks:
       haproxy-net:
         ipv4_address: 172.20.0.13
