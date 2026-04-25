@@ -189,7 +189,14 @@ jobs:
 
           if echo "$SUBJECTS" | grep -qE "^[a-zA-Z]+(\([^)]+\))?!:" \
              || echo "$BODIES" | grep -qE "^BREAKING[ -]CHANGE:"; then
-            ((MAJOR+=1)); MINOR=0; PATCH=0
+            # Mirror release-please's bump-minor-pre-major: while the
+            # project is still on major 0, breaking changes bump minor
+            # instead of major so CI tags stay in sync with releases.
+            if ((MAJOR == 0)); then
+              ((MINOR+=1)); PATCH=0
+            else
+              ((MAJOR+=1)); MINOR=0; PATCH=0
+            fi
           elif echo "$SUBJECTS" | grep -qE "^feat(\(.+\))?:"; then
             ((MINOR+=1)); PATCH=0
           else
@@ -237,7 +244,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.version.outputs.next }}-rc.${{ steps.version.outputs.short }}
+            org.opencontainers.image.version=${{ steps.version.outputs.next }}-rc.${{ steps.version.outputs.ts }}.${{ steps.version.outputs.short }}
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}/haproxy-operator:sha-${{ github.sha }}
             ${{ env.REGISTRY }}/${{ github.repository }}/haproxy-operator:${{ steps.version.outputs.next }}-rc.${{ steps.version.outputs.ts }}.${{ steps.version.outputs.short }}
