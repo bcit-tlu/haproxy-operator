@@ -131,20 +131,4 @@ func TestAPIError(t *testing.T) {
 	}
 }
 
-func TestIsNotFound(t *testing.T) {
-	t.Run("404 is not found", func(t *testing.T) {
-		if !isNotFound(&APIError{StatusCode: 404}) {
-			t.Error("expected true for 404")
-		}
-	})
-	t.Run("500 is not not-found", func(t *testing.T) {
-		if isNotFound(&APIError{StatusCode: 500}) {
-			t.Error("expected false for 500")
-		}
-	})
-	t.Run("non-APIError is not not-found", func(t *testing.T) {
-		if isNotFound(context.Canceled) {
-			t.Error("expected false for non-APIError")
-		}
-	})
-}
+

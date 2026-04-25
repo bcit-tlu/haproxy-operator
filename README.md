@@ -7,7 +7,7 @@ Designed for a GitOps workflow where infrastructure operators commit `haproxy.cf
 ## Architecture
 
 ```
-┌─────────────────────────┐   poll / webhook    ┌──────────────────────┐
+┌─────────────────────────┐      poll            ┌──────────────────────┐
 │  GitHub Repo            │◄────────────────────│  FluxCD              │
 │  (haproxy.cfg)          │   GitRepository     │  (K8s cluster)       │
 └─────────────────────────┘                     │  Kustomization       │
@@ -30,10 +30,11 @@ Designed for a GitOps workflow where infrastructure operators commit `haproxy.cf
 
 ## Features
 
-- **GitOps-native**: FluxCD handles Git polling, webhooks, and Secret synchronization
+- **GitOps-native**: FluxCD polls Git and syncs haproxy.cfg into a Kubernetes Secret
+- **One-way architecture**: Clusters are not publicly accessible — Flux pulls from GitHub; no direct cluster-to-external communication is required
 - **Config validation**: Pre-validates `haproxy.cfg` via the Dataplane API `only_validate` endpoint before applying
 - **SPIFFE/SPIRE mTLS**: Automatic workload identity and certificate rotation between K8s and the bare-metal load balancer
-- **Vault integration**: VSO (Vault Secrets Operator) for PKI certificate issuance and credential syncing
+- **Static TLS**: Alternative to SPIRE — mount cert files from a pre-provisioned Secret
 - **Environment promotion**: `latest` (dev) → `stable` (production) using Flux Kustomize overlays
 - **Kubernetes Events**: Accept/reject status emitted as Events on the config Secret for observability
 - **Leader election**: Safe multi-replica deployment with controller-runtime leader election
@@ -79,9 +80,9 @@ See `charts/haproxy-operator/values.yaml` for the full set of Helm values.
 
 When SPIRE is enabled (`spire.enabled=true`), the operator obtains X.509 SVIDs from the local SPIRE Agent for mTLS with the Dataplane API. No manual certificate distribution required — both the operator pod and the HAProxy host authenticate via their SPIFFE identities.
 
-### Vault PKI (via VSO)
+### Static TLS Certificates
 
-When Vault is enabled (`vault.enabled=true`), the Helm chart creates VSO `VaultPKISecret` CRs that issue and auto-rotate TLS certificates from the `pki-sica-v2` intermediate CA.
+When SPIRE is not enabled, the operator mounts TLS certificates from a Kubernetes Secret (`haproxy-operator-tls`). Pre-provision this Secret with `ca.crt`, `tls.crt`, and `tls.key` for mTLS communication with the Dataplane API.
 
 ## Project Structure
 
