@@ -93,6 +93,7 @@ jobs:
       packages: write
       id-token: write          # Cosign keyless (Sigstore OIDC)
       security-events: write   # Trivy SARIF upload to GitHub Security tab
+      actions: read            # Required by codeql-action/upload-sarif on private repos
     steps:
       - name: Check quality gate
         shell: bash
@@ -114,19 +115,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
-          else
-            BASE="${{ github.event.before }}"
-            HEAD="${{ github.sha }}"
+          # Always build on main pushes — release-please merge commits
+          # only touch CHANGELOG.md, manifest, and Chart.yaml (not Go
+          # source), but release-retag.yaml still needs a sha-<commit>
+          # image for the tagged commit. Change detection is only used
+          # to skip unnecessary PR builds.
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          # `github.event.before` is the all-zeroes SHA on first pushes
-          # to a new ref (and occasionally missing from the local clone
-          # on force-pushes / history edits). Fall back to HEAD~1 when
-          # available so `git diff` doesn't abort the job; if HEAD has
-          # no parent (initial commit), treat everything as changed.
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          # Fall back to HEAD~1 when the base SHA is missing or
+          # unavailable in the local clone.
           ZERO_SHA="0000000000000000000000000000000000000000"
           if [[ -z "${BASE}" || "${BASE}" == "${ZERO_SHA}" ]] \
              || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
