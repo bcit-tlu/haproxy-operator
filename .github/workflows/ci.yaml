@@ -91,6 +91,7 @@ jobs:
       packages: write
       id-token: write
       security-events: write
+      actions: read            # Required by codeql-action/upload-sarif on private repos
     with:
       component: haproxy-operator
       image_name: haproxy-operator
