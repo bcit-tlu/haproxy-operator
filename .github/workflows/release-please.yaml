@@ -1,125 +1,103 @@
-name: Release Please
+name: release-please
 
 on:
   push:
     branches: [main]
 
+# Least-privilege default: only `checkout` needs read access.
+# Each job elevates permissions to just what that job requires.
 permissions:
-  contents: write
-  pull-requests: write
-  # `actions: write` is required for the dispatch-publish job below to
-  # call `gh workflow run` on ci.yaml. GitHub explicitly forbids workflow
-  # runs created by tag pushes that are themselves made by GITHUB_TOKEN
-  # — so the `on: push: tags:` trigger in ci.yaml never fires for
-  # release-please tags. `workflow_dispatch`, however, IS allowed from
-  # GITHUB_TOKEN, so we re-dispatch ci.yaml explicitly against each
-  # just-created tag ref.
-  actions: write
+  contents: read
 
 jobs:
-  release-please:
+  release:
     runs-on: ubuntu-latest
+    # release-please creates/updates release PRs, tags, GitHub releases
+    # and comments on associated issues.
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     outputs:
       releases_created: ${{ steps.rp.outputs.releases_created }}
-      tag_name: ${{ steps.rp.outputs.tag_name }}
+      paths_released: ${{ steps.rp.outputs.paths_released }}
+      outputs: ${{ toJSON(steps.rp.outputs) }}
     steps:
+      # Manifest mode is inferred from the presence of
+      # `release-please-config.json` + `.release-please-manifest.json`;
+      # the top-level `release-type` input only accepts the leaf values
+      # and must be omitted here so each component's `release-type` from
+      # the config drives the per-package strategy.
       - uses: googleapis/release-please-action@v4
         id: rp
         with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Re-dispatch ci.yaml for each freshly-created tag ──────────
-  #
-  # release-please runs under the default GITHUB_TOKEN, so the tag it
-  # creates (e.g. v0.2.0-rc) does NOT auto-trigger ci.yaml's
-  # `on: push: tags:` listener — GitHub suppresses workflow chaining
-  # from GITHUB_TOKEN-created refs to prevent infinite recursion.
-  # Without this job, rc / stable tags never produce OCI image or
-  # chart artifacts; only the moving `head` pushed on main-branch
-  # commits ever reaches GHCR.
-  #
-  # `gh workflow run --ref <tag>` IS allowed from GITHUB_TOKEN because
-  # workflow_dispatch has an explicit audit trail and isn't prone to
-  # the same recursion class. The dispatched run sees
-  # github.ref=refs/tags/<tag> and github.event_name=workflow_dispatch,
-  # which ci.yaml's `versions` job handles identically to a `push` tag
-  # event (the tag-ref check runs before the event-name branches).
-  dispatch-publish:
-    needs: release-please
-    if: needs.release-please.outputs.releases_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
+      # `release-as` per-package is a one-shot: once the release PR it
+      # triggered has merged and the manifest has caught up, the override
+      # must be removed, otherwise every subsequent release-please run
+      # keeps pinning the same version and blocks normal semver bumps
+      # from feat:/fix: commits. This guard runs *after* release-please
+      # and is skipped whenever `releases_created=true`, so the
+      # tag/release finalization that happens on the merge-of-chore-PR
+      # push (where manifest has just caught up to release-as) isn't
+      # blocked. On any subsequent push where the state is still stale
+      # and there's nothing to release, the workflow fails loudly to
+      # force the cleanup PR.
       - uses: actions/checkout@v6
-        with:
-          # Full history + tags needed for the highest-stable computation
-          # in the "Promote graduated release" step below.
-          fetch-depth: 0
-
-      - name: Ensure ci.yaml has a workflow_dispatch trigger
+        if: steps.rp.outputs.releases_created != 'true'
+      - name: Guard against stale `release-as` entries
+        if: steps.rp.outputs.releases_created != 'true'
         run: |
-          if ! grep -q 'workflow_dispatch' .github/workflows/ci.yaml; then
-            echo "::error::.github/workflows/ci.yaml must declare 'workflow_dispatch' for this job to dispatch it" >&2
-            exit 1
-          fi
+          python3 - <<'PY'
+          import json, sys
+          with open("release-please-config.json") as f:
+              cfg = json.load(f)
+          with open(".release-please-manifest.json") as f:
+              manifest = json.load(f)
+          stale = []
+          for pkg, conf in cfg.get("packages", {}).items():
+              ra = conf.get("release-as")
+              if ra is not None and manifest.get(pkg) == ra:
+                  stale.append((pkg, ra))
+          if stale:
+              print("::error::Stale `release-as` entries in release-please-config.json:")
+              for pkg, ra in stale:
+                  print(f"::error::  packages.{pkg}.release-as={ra} already matches .release-please-manifest.json — remove this field so release-please can resume normal semver bumps.")
+              sys.exit(1)
+          PY
 
-      - name: Dispatch ci.yaml on the just-created tag
+  # Releases created via GITHUB_TOKEN do NOT trigger workflows that listen
+  # on `release: published` or `push: tags:`. Dispatch helm-publish and
+  # release-retag explicitly for each released tag.
+  dispatch-publish:
+    needs: release
+    if: needs.release.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch downstream workflows for each released tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
+          GH_REPO: ${{ github.repository }}
+          RP_OUTPUTS: ${{ needs.release.outputs.outputs }}
+          PATHS_RELEASED: ${{ needs.release.outputs.paths_released }}
         run: |
           set -euo pipefail
-          if [[ -z "${TAG}" ]]; then
-            echo "::warning::release-please reported a release but no tag_name output; skipping dispatch"
-            exit 0
-          fi
-          echo "Dispatching ci.yaml on tag ref: ${TAG}"
-          gh workflow run ci.yaml --ref "${TAG}"
-
-      # ── Promote graduated releases from Pre-release → Latest ────
-      #
-      # release-please-config.json sets repo-level `"prerelease": true`,
-      # which makes release-please mark EVERY GitHub release it creates
-      # (rc AND graduated full-release) with prerelease=true. That is
-      # correct for rc tags (vX.Y.Z-rcN) but wrong for graduated stable
-      # tags (vX.Y.Z), which should appear as full releases in the
-      # GitHub UI and — iff this is the highest stable semver — as
-      # "Latest release".
-      #
-      # We fix this after the fact: whenever the just-created tag has
-      # no prerelease suffix (no `-` in the version), flip the GitHub
-      # release's `prerelease` flag to false and, iff this is the
-      # highest stable semver, set it as the repo's "Latest release".
-      # This mirrors the OCI-publish logic in ci.yaml's `versions` job
-      # exactly (same tag glob, same `-`-filter, same `sort -V | tail`),
-      # so the GitHub release's "Latest" flag tracks the image/chart
-      # `:latest` pointer.
-      - name: Promote graduated release to full release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${TAG}" ]]; then
-            echo "::warning::release-please reported a release but no tag_name output; skipping promote"
-            exit 0
-          fi
-          VERSION="${TAG#v}"
-          if [[ "${VERSION}" == *-* ]]; then
-            echo "Tag ${TAG} is a prerelease (contains '-'); leaving GitHub release flags as-is."
-            exit 0
-          fi
-
-          HIGHEST_STABLE=$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" \
-            | grep -v -- '-' \
-            | sed "s/^v//" \
-            | sort -V \
-            | tail -n1)
-
-          if [[ "${VERSION}" == "${HIGHEST_STABLE}" ]]; then
-            echo "Promoting ${TAG}: prerelease=false, latest=true (highest stable)."
-            gh release edit "${TAG}" --prerelease=false --latest=true
-          else
-            echo "Promoting ${TAG}: prerelease=false, latest=false (backport below highest stable ${HIGHEST_STABLE})."
-            gh release edit "${TAG}" --prerelease=false --latest=false
-          fi
+          for path in $(jq -r '.[]' <<<"${PATHS_RELEASED}"); do
+            tag=$(jq -r --arg key "${path}--tag_name" '.[$key] // empty' <<<"${RP_OUTPUTS}")
+            if [[ -z "${tag}" ]]; then
+              echo "::warning::No tag_name output for path '${path}', skipping"
+              continue
+            fi
+            echo "Dispatching helm-publish.yaml for ${tag}"
+            gh workflow run helm-publish.yaml \
+              --ref "${tag}" \
+              -f tag_name="${tag}"
+            echo "Dispatching release-retag.yaml for ${tag}"
+            gh workflow run release-retag.yaml \
+              --ref "${tag}" \
+              -f tag_name="${tag}"
+          done
