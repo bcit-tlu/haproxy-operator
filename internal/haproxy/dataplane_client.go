@@ -183,15 +183,6 @@ func (c *Client) getConfigVersion(ctx context.Context) (int, error) {
 
 // --- HTTP plumbing ---
 
-func (c *Client) doRequestVersioned(ctx context.Context, method, p string, body any, result any) error {
-	ver, err := c.getConfigVersion(ctx)
-	if err != nil {
-		return err
-	}
-	withVersion := addOrReplaceQuery(p, "version", fmt.Sprintf("%d", ver))
-	return c.doRequest(ctx, method, withVersion, body, result)
-}
-
 func (c *Client) doRequest(ctx context.Context, method, p string, body any, result any) error {
 	ref := *c.baseURL
 	ref.Path = path.Join(strings.TrimSuffix(c.baseURL.Path, "/"), strings.TrimPrefix(p, "/"))
@@ -286,13 +277,6 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("dataplane api error (status %d): %s", e.StatusCode, e.Message)
-}
-
-func isNotFound(err error) bool {
-	if e, ok := err.(*APIError); ok {
-		return e.StatusCode == http.StatusNotFound
-	}
-	return false
 }
 
 func addOrReplaceQuery(p, key, value string) string {
