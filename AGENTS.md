@@ -32,7 +32,6 @@
 - `/internal/spire/` — SPIFFE/SPIRE Workload API integration
 - `/internal/status/` — K8s Event reporter
 - `/charts/haproxy-operator/` — Helm chart
-- `/flux/` — Example Flux manifests
 - `/dev/` — Local development assets
 
 ## Development Workflow

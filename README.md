@@ -59,37 +59,6 @@ curl http://localhost:8080    # Traffic through HAProxy
 curl http://localhost:8404    # HAProxy stats
 ```
 
-## Kubernetes Deployment
-
-### Prerequisites
-
-- FluxCD installed on the cluster
-- Vault Secrets Operator (VSO) installed (if using Vault for certs/credentials)
-- SPIRE deployed on K8s nodes and the HAProxy host (if using SPIRE for mTLS)
-
-### Deploy with Flux
-
-1. **Create a config repo** (e.g. `bcit-tlu/haproxy-configs`) containing your `haproxy.cfg` and a Kustomization that generates a Secret.
-
-2. **Add Flux manifests** to your fleet repo using the templates in `flux/`:
-   - `git-repository.yaml` — points at your config repo
-   - `kustomization.yaml` — syncs config into a K8s Secret
-   - `receiver.yaml` — webhook for immediate reconciliation
-   - `helmrelease.yaml` — deploys the operator
-
-3. **Set up the webhook** for instant push-to-apply:
-   ```bash
-   kubectl -n haproxy-operator create secret generic webhook-token \
-     --from-literal=token=$(openssl rand -hex 32)
-   # Then add the webhook URL to your GitHub repo settings
-   ```
-
-### Environment Promotion
-
-- **latest** cluster: Flux watches the `main` branch → operator pushes to dev/research LB
-- **stable** cluster: Flux watches the `release` branch → operator pushes to production LB
-- Promote by merging `main` → `release` (or using release-please tags)
-
 ## Configuration
 
 | Flag / Env Var | Default | Description |
@@ -126,7 +95,6 @@ When Vault is enabled (`vault.enabled=true`), the Helm chart creates VSO `VaultP
 │   ├── spire/                       # SPIFFE/SPIRE Workload API integration
 │   └── status/                      # K8s Event reporter
 ├── charts/haproxy-operator/         # Helm chart (OCI → GHCR)
-├── flux/                            # Example Flux manifests
 ├── dev/                             # Local development assets
 ├── .github/workflows/               # CI/CD (test, build, sign, scan, publish)
 └── docker-compose.yaml              # Local dev environment
