@@ -100,11 +100,7 @@ spec:
         {{- if not .Values.spire.enabled }}
         - name: tls
           secret:
-            {{- if .Values.vault.enabled }}
-            secretName: {{ .Values.vault.pki.secretName }}
-            {{- else }}
             secretName: haproxy-operator-tls
-            {{- end }}
         {{- end }}
         {{- if .Values.spire.enabled }}
         - name: spire-agent-socket
