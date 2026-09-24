@@ -41,6 +41,9 @@ func NewClient(cfg APIConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("dataplane url must use http or https scheme, got %q", u.Scheme)
+	}
 
 	requiresTLS := u.Scheme == "https"
 	if requiresTLS && !cfg.Insecure {
@@ -176,12 +179,35 @@ func (c *Client) ValidateRawConfiguration(ctx context.Context, raw string) error
 func (c *Client) getConfigVersion(ctx context.Context) (int, error) {
 	var n int
 	if err := c.doRequest(ctx, http.MethodGet, "/services/haproxy/configuration/version", nil, &n); err != nil {
-		return 0, err
+		// Wrapped so Classify never reads a version-read HTTP status as a
+		// verdict on a pending configuration (see VersionCheckError).
+		return 0, &VersionCheckError{Err: err}
 	}
 	return n, nil
 }
 
 // --- HTTP plumbing ---
+
+// Ping performs a lightweight authenticated probe (configuration version)
+// without mutating anything — used by the readiness check to prove the
+// credentials and endpoint are working before the pod is marked ready.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.getConfigVersion(ctx)
+	return err
+}
+
+// Info returns the running HAProxy version string reported by the Dataplane
+// API. A safe read used for connectivity verification and logging.
+func (c *Client) Info(ctx context.Context) (string, error) {
+	var out map[string]any
+	if err := c.doRequest(ctx, http.MethodGet, "/services/haproxy/info", nil, &out); err != nil {
+		return "", err
+	}
+	if v, ok := out["version"].(string); ok {
+		return v, nil
+	}
+	return "", nil
+}
 
 func (c *Client) doRequest(ctx context.Context, method, p string, body any, result any) error {
 	ref := *c.baseURL
@@ -218,8 +244,7 @@ func (c *Client) doRequest(ctx context.Context, method, p string, body any, resu
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		return newAPIError(resp)
 	}
 
 	if result != nil && resp.StatusCode != http.StatusNoContent {
@@ -259,8 +284,7 @@ func (c *Client) doRequestPlain(ctx context.Context, method, p string, body stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		return newAPIError(resp)
 	}
 
 	if result != nil && resp.StatusCode != http.StatusNoContent {
@@ -269,7 +293,9 @@ func (c *Client) doRequestPlain(ctx context.Context, method, p string, body stri
 	return nil
 }
 
-// APIError represents an error response from the Data Plane API.
+// APIError represents an error response from the Data Plane API. Message is
+// bounded to maxAPIErrorBody at capture time so it is always safe to surface
+// in Events/annotations.
 type APIError struct {
 	StatusCode int
 	Message    string
@@ -277,6 +303,17 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("dataplane api error (status %d): %s", e.StatusCode, e.Message)
+}
+
+// maxAPIErrorBody caps how much of an error response body is retained.
+// Dataplane can echo the submitted haproxy.cfg in validation failures; an
+// unbounded capture would flood Events, annotations, and logs.
+const maxAPIErrorBody = 4096
+
+// newAPIError builds an APIError from an HTTP response, bounding the body.
+func newAPIError(resp *http.Response) *APIError {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIErrorBody))
+	return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 }
 
 func addOrReplaceQuery(p, key, value string) string {
@@ -290,5 +327,3 @@ func addOrReplaceQuery(p, key, value string) string {
 	vals.Set(key, value)
 	return base + "?" + vals.Encode()
 }
-
-

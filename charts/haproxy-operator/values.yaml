@@ -26,7 +26,14 @@ dataplane:
   caCertPath: /etc/haproxy-operator/tls/ca.crt
   clientCertPath: /etc/haproxy-operator/tls/tls.crt
   clientKeyPath: /etc/haproxy-operator/tls/tls.key
-  # Basic auth credentials (optional, from a Secret).
+  tls:
+    # Existing Secret holding ca.crt/tls.crt/tls.key. Ignored when
+    # vault.enabled (the VaultPKISecret destination name wins) or
+    # spire.enabled (Workload API supplies credentials).
+    existingSecret: haproxy-operator-tls
+  # Basic auth credentials (optional, from a Secret). When left empty and
+  # vault.static.enabled=true, the deployment falls back to
+  # vault.static.secretName so VSO-synced credentials are actually consumed.
   auth:
     secretName: ""
     usernameKey: username
@@ -34,10 +41,39 @@ dataplane:
 
 # SPIFFE/SPIRE integration. When enabled, mTLS credentials are obtained
 # from the SPIRE Agent Workload API instead of static cert files.
+# Mutually exclusive with vault.enabled — kept disabled for staging.
 spire:
   enabled: false
   socketPath: "unix:///run/spire/agent.sock"
 
+# Vault Secrets Operator (VSO) integration.
+# Creates VaultPKISecret / VaultStaticSecret CRs that sync material into the
+# K8s Secrets the deployment mounts.
+vault:
+  enabled: false
+  # VaultAuth CR name (created by flux-fleet base manifests).
+  authRef: vault-auth
+  pki:
+    mount: pki-haproxy
+    role: haproxy-operator-client
+    commonName: haproxy-operator.latest.ltc.bcit.ca
+    ttl: 168h
+    # Secret name where VSO writes the issued certificate. The rendered
+    # destination keys are exactly ca.crt / tls.crt / tls.key — matching
+    # dataplane.caCertPath/clientCertPath/clientKeyPath above.
+    secretName: haproxy-operator-tls
+  static:
+    # Dataplane API basic-auth credentials in Vault KV (separate from TLS).
+    enabled: false
+    mount: tlu-infrastructure
+    path: haproxy/latest/dataplane-basic-auth
+    secretName: haproxy-operator-dataplane-auth
+
+# Namespace-scoped RBAC is preferred: the operator only needs Secrets and
+# Events in its own namespace plus leader-election leases. Set false to
+# restore cluster-wide ClusterRole/ClusterRoleBinding.
+rbac:
+  namespaced: true
 
 leaderElection:
   enabled: true

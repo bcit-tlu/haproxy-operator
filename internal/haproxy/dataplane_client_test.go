@@ -130,5 +130,3 @@ func TestAPIError(t *testing.T) {
 		t.Errorf("unexpected error string: %s", e.Error())
 	}
 }
-
-

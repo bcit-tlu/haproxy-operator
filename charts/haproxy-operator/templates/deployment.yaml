@@ -1,3 +1,15 @@
+{{- if and .Values.spire.enabled .Values.vault.enabled }}
+{{- fail "spire.enabled and vault.enabled are mutually exclusive — pick one credential source" }}
+{{- end }}
+{{- if and .Values.dataplane.auth.secretName (or (not .Values.dataplane.auth.usernameKey) (not .Values.dataplane.auth.passwordKey)) }}
+{{- fail "dataplane.auth.secretName requires usernameKey and passwordKey" }}
+{{- end }}
+{{- if and (not .Values.spire.enabled) (not .Values.vault.enabled) (not .Values.dataplane.tls.existingSecret) }}
+{{- fail "dataplane.tls.existingSecret is required when neither vault.enabled nor spire.enabled is set" }}
+{{- end }}
+{{- /* Effective Basic Auth Secret: explicit dataplane.auth.secretName wins;
+     otherwise fall back to the VSO-synced Secret when vault.static is on. */}}
+{{- $authSecret := .Values.dataplane.auth.secretName | default (ternary .Values.vault.static.secretName "" (and .Values.vault.enabled .Values.vault.static.enabled)) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,17 +63,17 @@ spec:
             {{- end }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --health-probe-bind-address=:{{ .Values.probes.port }}
-          {{- if .Values.dataplane.auth.secretName }}
+          {{- if $authSecret }}
           env:
             - name: DATAPLANE_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.dataplane.auth.secretName }}
+                  name: {{ $authSecret }}
                   key: {{ .Values.dataplane.auth.usernameKey }}
             - name: DATAPLANE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.dataplane.auth.secretName }}
+                  name: {{ $authSecret }}
                   key: {{ .Values.dataplane.auth.passwordKey }}
           {{- end }}
           ports:
@@ -100,7 +112,7 @@ spec:
         {{- if not .Values.spire.enabled }}
         - name: tls
           secret:
-            secretName: haproxy-operator-tls
+            secretName: {{ ternary .Values.vault.pki.secretName .Values.dataplane.tls.existingSecret .Values.vault.enabled }}
         {{- end }}
         {{- if .Values.spire.enabled }}
         - name: spire-agent-socket

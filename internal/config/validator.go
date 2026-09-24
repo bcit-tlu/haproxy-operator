@@ -21,7 +21,10 @@ func NewValidator(client *haproxy.Client) *Validator {
 // only_validate=true endpoint. Returns nil if valid.
 func (v *Validator) Validate(ctx context.Context, raw string) error {
 	if raw == "" {
-		return fmt.Errorf("empty configuration")
+		// Deterministic local rejection: unchanged bytes can never validate,
+		// so Classify must see ConfigRejected rather than an opaque error that
+		// would retry forever.
+		return fmt.Errorf("empty configuration (%w)", haproxy.ErrLocalRejection)
 	}
 	return v.client.ValidateRawConfiguration(ctx, raw)
 }
