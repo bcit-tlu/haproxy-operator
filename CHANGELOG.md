@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.3.0...v0.4.0) (2026-09-24)
+
+
+### Features
+
+* **operator:** typed dataplane errors, safe retry, VSO contract, readiness ([#21](https://github.com/bcit-tlu/haproxy-operator/issues/21)) ([b65c683](https://github.com/bcit-tlu/haproxy-operator/commit/b65c683f7248804d1a49b7b43772b87bd939e7d2))
+
 ## [0.3.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.2.0...v0.3.0) (2026-04-21)
 
 
