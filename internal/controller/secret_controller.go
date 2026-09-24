@@ -175,18 +175,6 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	rawConfig := string(configData)
 
-	haproxyClient, err := r.getOrCreateClient(ctx)
-	if err != nil {
-		log.Error(err, "failed to create dataplane client")
-		class := haproxy.Classify(err)
-		metrics.TransientErrors.WithLabelValues(string(class)).Inc()
-		if uerr := r.failWithStatus(ctx, secret, class.StatusValue(), err.Error()); uerr != nil {
-			return ctrl.Result{}, uerr
-		}
-		r.transientFailures++
-		return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
-	}
-
 	currentHash := config.HashBytes(configData)
 	lastAppliedHash := secret.Annotations[LastAppliedHashAnnotation]
 
@@ -197,7 +185,8 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// New desired bytes reset the transient-failure streak — they were never
-	// given a chance to fail.
+	// given a chance to fail. This runs before client initialization so a
+	// changed Secret does not inherit a prior init failure's backoff.
 	if r.lastDesiredHash != currentHash {
 		r.transientFailures = 0
 		r.lastDesiredHash = currentHash
@@ -208,6 +197,18 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if currentHash == secret.Annotations[LastFailedHashAnnotation] {
 		log.Info("configuration previously rejected, skipping until changed")
 		return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+	}
+
+	haproxyClient, err := r.getOrCreateClient(ctx)
+	if err != nil {
+		log.Error(err, "failed to create dataplane client")
+		class := haproxy.Classify(err)
+		metrics.TransientErrors.WithLabelValues(string(class)).Inc()
+		if uerr := r.failWithStatus(ctx, secret, class.StatusValue(), err.Error()); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+		r.transientFailures++
+		return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
 	}
 
 	log.Info("configuration changed, validating",
@@ -265,7 +266,9 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		metrics.TransientErrors.WithLabelValues(string(class)).Inc()
 		status.EmitEvent(r.Recorder, secret, eventReasonForClass(class), err.Error())
-		if uerr := r.failWithStatus(ctx, secret, "ApplyError", err.Error()); uerr != nil {
+		// Keep the failure stage AND its class in the status — consumers can
+		// distinguish e.g. ApplyAuthError from a validate-time AuthError.
+		if uerr := r.failWithStatus(ctx, secret, "Apply"+class.StatusValue(), err.Error()); uerr != nil {
 			return ctrl.Result{}, uerr
 		}
 		r.transientFailures++
@@ -415,7 +418,10 @@ func (r *SecretReconciler) patchAnnotations(ctx context.Context, secret *corev1.
 		secret.Annotations = make(map[string]string)
 	}
 	mutate(secret.Annotations)
-	return r.Patch(ctx, secret, client.MergeFrom(orig))
+	// Optimistic lock: the patch carries our read resourceVersion, so a
+	// concurrent Secret write (e.g. Flux replacing data mid-apply) fails
+	// with a conflict instead of stamping stale status on newer bytes.
+	return r.Patch(ctx, secret, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
 }
 
 // failWithStatus records status/message annotations (patch-scoped to

@@ -1,9 +1,14 @@
 {{- if .Values.rbac.namespaced }}
+# Workload Role lives in the WATCHED namespace (default: release namespace) —
+# a Role only grants in its own namespace, and the operator's Secret cache is
+# scoped to watchNamespace, so placing this in the release namespace would
+# break watches whenever the two differ.
+{{- $watchNS := .Values.watchNamespace | default .Release.Namespace }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "haproxy-operator.fullname" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $watchNS }}
   labels:
     {{- include "haproxy-operator.labels" . | nindent 4 }}
 rules:
@@ -13,7 +18,17 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
-  # Leader election
+---
+# Leader-election Role stays in the release namespace, where the manager's
+# lease is created.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "haproxy-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "haproxy-operator.labels" . | nindent 4 }}
+rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

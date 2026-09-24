@@ -179,7 +179,9 @@ func (c *Client) ValidateRawConfiguration(ctx context.Context, raw string) error
 func (c *Client) getConfigVersion(ctx context.Context) (int, error) {
 	var n int
 	if err := c.doRequest(ctx, http.MethodGet, "/services/haproxy/configuration/version", nil, &n); err != nil {
-		return 0, err
+		// Wrapped so Classify never reads a version-read HTTP status as a
+		// verdict on a pending configuration (see VersionCheckError).
+		return 0, &VersionCheckError{Err: err}
 	}
 	return n, nil
 }

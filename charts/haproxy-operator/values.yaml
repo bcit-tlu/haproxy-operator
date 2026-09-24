@@ -31,7 +31,9 @@ dataplane:
     # vault.enabled (the VaultPKISecret destination name wins) or
     # spire.enabled (Workload API supplies credentials).
     existingSecret: haproxy-operator-tls
-  # Basic auth credentials (optional, from a Secret).
+  # Basic auth credentials (optional, from a Secret). When left empty and
+  # vault.static.enabled=true, the deployment falls back to
+  # vault.static.secretName so VSO-synced credentials are actually consumed.
   auth:
     secretName: ""
     usernameKey: username

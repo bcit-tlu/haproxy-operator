@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -95,11 +96,41 @@ func isTLSError(err error) bool {
 	return false
 }
 
+// ErrLocalRejection marks a deterministic rejection decided locally, before
+// any bytes reach the Dataplane API (e.g. an empty configuration). Retrying
+// the same payload cannot succeed — same semantics as an API-side 400/422.
+var ErrLocalRejection = errors.New("configuration rejected locally")
+
+// VersionCheckError wraps a failure of the configuration-version GET that
+// precedes a raw-config POST. A non-2xx response there says nothing about the
+// candidate configuration, so it must never classify as ConfigRejected —
+// otherwise a transient API hiccup would suppress unsubmitted config bytes
+// until they change.
+type VersionCheckError struct{ Err error }
+
+func (e *VersionCheckError) Error() string { return fmt.Sprintf("config version check: %v", e.Err) }
+func (e *VersionCheckError) Unwrap() error { return e.Err }
+
 // Classify assigns an ErrorClass to an error returned by the Dataplane
 // client or its transport.
 func Classify(err error) ErrorClass {
 	if err == nil {
 		return ""
+	}
+
+	if errors.Is(err, ErrLocalRejection) {
+		return ClassConfigRejected
+	}
+
+	var vce *VersionCheckError
+	if errors.As(err, &vce) {
+		inner := Classify(vce.Err)
+		if inner == ClassConfigRejected {
+			// A 400/422 on the version read is an API-level fault, not a
+			// verdict on the pending config — treat it as transient.
+			return ClassUnknown
+		}
+		return inner
 	}
 
 	var apiErr *APIError

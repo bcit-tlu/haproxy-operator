@@ -135,3 +135,47 @@ func (r *infiniteReader) Read(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+func TestClassifyVersionCheckError(t *testing.T) {
+	t.Run("400 on version GET is not config rejection", func(t *testing.T) {
+		err := &VersionCheckError{Err: &APIError{StatusCode: http.StatusBadRequest, Message: "bad version request"}}
+		if got := Classify(err); got != ClassUnknown {
+			t.Errorf("got %q, want %q — a version-read 4xx must not suppress unsubmitted config", got, ClassUnknown)
+		}
+	})
+
+	t.Run("422 on version GET is not config rejection", func(t *testing.T) {
+		err := &VersionCheckError{Err: &APIError{StatusCode: http.StatusUnprocessableEntity, Message: "odd"}}
+		if got := Classify(err); got != ClassUnknown {
+			t.Errorf("got %q, want %q", got, ClassUnknown)
+		}
+	})
+
+	t.Run("401 on version GET stays AuthError", func(t *testing.T) {
+		err := &VersionCheckError{Err: &APIError{StatusCode: http.StatusUnauthorized, Message: "denied"}}
+		if got := Classify(err); got != ClassAuth {
+			t.Errorf("got %q, want %q", got, ClassAuth)
+		}
+	})
+
+	t.Run("transport failure on version GET stays ConnectionError", func(t *testing.T) {
+		err := &VersionCheckError{Err: &url.Error{Op: "Get", URL: "https://x", Err: errors.New("dial tcp: connection refused")}}
+		if got := Classify(err); got != ClassConnection {
+			t.Errorf("got %q, want %q", got, ClassConnection)
+		}
+	})
+
+	t.Run("nested inside fmt wrap", func(t *testing.T) {
+		err := fmt.Errorf("apply: %w", &VersionCheckError{Err: &APIError{StatusCode: 400, Message: "x"}})
+		if got := Classify(err); got != ClassUnknown {
+			t.Errorf("got %q, want %q", got, ClassUnknown)
+		}
+	})
+}
+
+func TestClassifyLocalRejection(t *testing.T) {
+	err := fmt.Errorf("empty configuration (%w)", ErrLocalRejection)
+	if got := Classify(err); got != ClassConfigRejected {
+		t.Errorf("got %q, want %q", got, ClassConfigRejected)
+	}
+}

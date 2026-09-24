@@ -7,6 +7,9 @@
 {{- if and (not .Values.spire.enabled) (not .Values.vault.enabled) (not .Values.dataplane.tls.existingSecret) }}
 {{- fail "dataplane.tls.existingSecret is required when neither vault.enabled nor spire.enabled is set" }}
 {{- end }}
+{{- /* Effective Basic Auth Secret: explicit dataplane.auth.secretName wins;
+     otherwise fall back to the VSO-synced Secret when vault.static is on. */}}
+{{- $authSecret := .Values.dataplane.auth.secretName | default (ternary .Values.vault.static.secretName "" (and .Values.vault.enabled .Values.vault.static.enabled)) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -60,17 +63,17 @@ spec:
             {{- end }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --health-probe-bind-address=:{{ .Values.probes.port }}
-          {{- if .Values.dataplane.auth.secretName }}
+          {{- if $authSecret }}
           env:
             - name: DATAPLANE_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.dataplane.auth.secretName }}
+                  name: {{ $authSecret }}
                   key: {{ .Values.dataplane.auth.usernameKey }}
             - name: DATAPLANE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.dataplane.auth.secretName }}
+                  name: {{ $authSecret }}
                   key: {{ .Values.dataplane.auth.passwordKey }}
           {{- end }}
           ports:

@@ -18,4 +18,9 @@ spec:
   destination:
     name: {{ .Values.vault.static.secretName }}
     create: true
+  # Rotated Basic Auth must reach pods — env vars resolve once at container
+  # start, so restart the deployment when VSO refreshes this Secret.
+  rolloutRestartTargets:
+    - kind: Deployment
+      name: {{ include "haproxy-operator.fullname" . }}
 {{- end }}
