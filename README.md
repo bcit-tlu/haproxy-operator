@@ -34,7 +34,11 @@ Designed for a GitOps workflow where infrastructure operators commit `haproxy.cf
 - **One-way architecture**: Clusters are not publicly accessible — Flux pulls from GitHub; no direct cluster-to-external communication is required
 - **Config validation**: Pre-validates `haproxy.cfg` via the Dataplane API `only_validate` endpoint before applying
 - **SPIFFE/SPIRE mTLS**: Automatic workload identity and certificate rotation between K8s and the bare-metal load balancer
-- **Static TLS**: Alternative to SPIRE — mount cert files from a pre-provisioned Secret
+- **Vault PKI (VSO)**: Alternative to SPIRE — VaultPKISecret issues the operator's mTLS client cert (destination keys `ca.crt`/`tls.crt`/`tls.key`) and VaultStaticSecret syncs Dataplane Basic Auth; both rotate automatically
+- **Static TLS**: Alternative to SPIRE/VSO — mount cert files from a pre-provisioned Secret (`dataplane.tls.existingSecret`)
+- **Typed failure handling**: Dataplane errors are classified (ConfigRejected / AuthError / TLSConnectionError / ConnectionError / ConflictError / RateLimited / DataplaneServerError). Only deterministic rejections suppress the desired config hash — transient failures retry the same bytes with bounded exponential backoff
+- **Patch-scoped status**: Secret annotations are written via merge patch, so Flux-owned annotations are never clobbered; Event/annotation messages are sanitized and bounded
+- **Credential-aware readiness**: `/readyz` proves the mounted credentials and an authenticated Dataplane read; `/healthz` stays process-local
 - **Environment promotion**: `latest` (dev) → `stable` (production) using Flux Kustomize overlays
 - **Kubernetes Events**: Accept/reject status emitted as Events on the config Secret for observability
 - **Leader election**: Safe multi-replica deployment with controller-runtime leader election

@@ -1,0 +1,21 @@
+{{- if and .Values.vault.enabled .Values.vault.static.enabled }}
+# VSO VaultStaticSecret — syncs the Dataplane API basic-auth credentials
+# from Vault KV into the Secret the deployment consumes via env vars.
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultStaticSecret
+metadata:
+  name: {{ include "haproxy-operator.fullname" . }}-dataplane-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "haproxy-operator.labels" . | nindent 4 }}
+spec:
+  vaultAuthRef: {{ .Values.vault.authRef }}
+  mount: {{ .Values.vault.static.mount }}
+  path: {{ .Values.vault.static.path }}
+  type: kv-v2
+  refreshAfter: 1h
+  hmacSecretData: true
+  destination:
+    name: {{ .Values.vault.static.secretName }}
+    create: true
+{{- end }}
