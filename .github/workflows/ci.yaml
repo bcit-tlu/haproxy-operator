@@ -98,3 +98,98 @@ jobs:
       context: .
       tag_prefix: "v"
     secrets: inherit
+
+  # ── Chart publish (rc) ─────────────────────────────────
+  #
+  # Packages charts/haproxy-operator at the image build's rc_version and
+  # pushes it to oci://ghcr.io/<repo>/charts. The cluster03 `latest`
+  # cluster-env patches app OCIRepositories to only resolve tags matching
+  # `^.*-rc.*$`, so without this job no chart tag ever resolves there
+  # (flux-fleet#314). Stable versions are still published by
+  # helm-publish.yaml on release.
+
+  helm-publish-rc:
+    needs: [helm-lint, build-haproxy-operator]
+    if: >-
+      always() && github.event_name != 'pull_request' &&
+      needs.helm-lint.result == 'success' &&
+      needs.build-haproxy-operator.result == 'success' &&
+      needs.build-haproxy-operator.outputs.changed == 'true' &&
+      needs.build-haproxy-operator.outputs.rc_version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.3.0
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Cosign login (OCI)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY: ${{ env.REGISTRY }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "${GITHUB_TOKEN}" | \
+            cosign login "${REGISTRY}" \
+            -u "${ACTOR}" \
+            --password-stdin
+
+      - name: Helm login (OCI)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY: ${{ env.REGISTRY }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "${GITHUB_TOKEN}" | \
+            helm registry login "${REGISTRY}" \
+            -u "${ACTOR}" \
+            --password-stdin
+
+      - name: Package, push & sign chart
+        shell: bash
+        env:
+          VERSION: ${{ needs.build-haproxy-operator.outputs.rc_version }}
+          OCI_BASE: oci://${{ env.REGISTRY }}/${{ github.repository }}/charts
+          IMAGE_BASE: ${{ env.REGISTRY }}/${{ github.repository }}/charts
+        run: |
+          set -euo pipefail
+
+          CHART_DIR="charts/haproxy-operator"
+          CHART_NAME=$(yq '.name' "${CHART_DIR}/Chart.yaml")
+          DEST_DIR="/tmp/charts"
+          mkdir -p "${DEST_DIR}"
+
+          echo "::group::${CHART_NAME} ${VERSION}"
+
+          helm dependency update "${CHART_DIR}" || true
+
+          helm package "${CHART_DIR}" \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            -d "${DEST_DIR}"
+
+          PUSH_OUT=$(helm push \
+            "${DEST_DIR}/${CHART_NAME}-${VERSION}.tgz" \
+            "${OCI_BASE}" 2>&1) || { echo "${PUSH_OUT}"; exit 1; }
+          echo "${PUSH_OUT}"
+
+          # Tolerant digest parse: case-insensitive, allows leading whitespace.
+          DIGEST=$(printf '%s\n' "${PUSH_OUT}" \
+            | awk 'tolower($1)=="digest:"{print $2; exit}')
+          if [[ -z "${DIGEST}" ]]; then
+            echo "::error::helm push for ${CHART_NAME} succeeded but no digest found in output"
+            exit 1
+          fi
+
+          cosign sign --yes "${IMAGE_BASE}/${CHART_NAME}@${DIGEST}"
+
+          echo "::endgroup::"
