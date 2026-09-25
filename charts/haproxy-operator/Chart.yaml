@@ -9,6 +9,6 @@ description: >-
 # string into both fields at publish time. This keeps the GitHub release,
 # git tag, image tag, and chart OCI tag identical so operators can trace
 # any deployed pod back to a single version string.
-version: 0.3.0 # x-release-please-version
-appVersion: "0.3.0" # x-release-please-version
+version: 0.4.0 # x-release-please-version
+appVersion: "0.4.0" # x-release-please-version
 type: application
