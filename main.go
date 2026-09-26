@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"net/url"
 	"os"
 	"time"
 
@@ -21,6 +22,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
+
+// defaultDataplaneURL is the in-cluster Dataplane API endpoint. Local mode
+// downgrades it to plain HTTP when the user has not overridden it.
+const defaultDataplaneURL = "https://haproxy:5555/v3"
 
 var (
 	scheme   = runtime.NewScheme()
@@ -72,7 +77,7 @@ func main() {
 	flag.DurationVar(&localPoll, "local-poll", 5*time.Second,
 		"Polling interval for local mode")
 
-	flag.StringVar(&dataplaneURL, "dataplane-url", envOr("DATAPLANE_URL", "https://haproxy:5555/v3"), "HAProxy Data Plane API base URL")
+	flag.StringVar(&dataplaneURL, "dataplane-url", envOr("DATAPLANE_URL", defaultDataplaneURL), "HAProxy Data Plane API base URL")
 	flag.StringVar(&dataplaneCACert, "dataplane-ca-cert", envOr("DATAPLANE_CA_CERT", ""), "Path to Data Plane API CA certificate (mTLS)")
 	flag.StringVar(&dataplaneClientCert, "dataplane-client-cert", envOr("DATAPLANE_CLIENT_CERT", ""), "Path to Data Plane API client certificate (mTLS)")
 	flag.StringVar(&dataplaneClientKey, "dataplane-client-key", envOr("DATAPLANE_CLIENT_KEY", ""), "Path to Data Plane API client key (mTLS)")
@@ -103,8 +108,8 @@ func main() {
 			setupLog.Error(nil, "local-config-path is required in local mode")
 			os.Exit(1)
 		}
-		if dataplaneURL == "https://haproxy:5555/v3" {
-			dataplaneURL = "http://haproxy:5555/v3"
+		if dataplaneURL == defaultDataplaneURL {
+			dataplaneURL = withScheme(defaultDataplaneURL, "http")
 			dataplaneCACert = ""
 			dataplaneClientCert = ""
 			dataplaneClientKey = ""
@@ -197,11 +202,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
-	}
-
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
@@ -216,18 +216,21 @@ func envOr(k, d string) string {
 	return d
 }
 
+// withScheme returns rawURL with its scheme replaced.
+func withScheme(rawURL, scheme string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		setupLog.Error(err, "invalid dataplane url", "url", rawURL)
+		os.Exit(1)
+	}
+	u.Scheme = scheme
+	return u.String()
+}
+
 func loadRESTConfig() *rest.Config {
 	override := envOr("KUBE_APISERVER", "")
 	kubeconfig := envOr("KUBECONFIG", "")
-	if kubeconfig != "" {
-		cfg, err := clientcmd.BuildConfigFromFlags(override, kubeconfig)
-		if err != nil {
-			setupLog.Error(err, "unable to build rest config", "apiserver", override, "kubeconfig", kubeconfig)
-			os.Exit(1)
-		}
-		return cfg
-	}
-	if override == "" {
+	if kubeconfig == "" && override == "" {
 		return ctrl.GetConfigOrDie()
 	}
 
