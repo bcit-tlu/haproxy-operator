@@ -95,6 +95,10 @@ spec:
               port: probes
             initialDelaySeconds: 5
             periodSeconds: 10
+            # /readyz performs a real mTLS call to the Dataplane API
+            # (DataplaneReady, self-capped at 10s); the kubelet must allow
+            # more than that or the probe dies as "context canceled".
+            timeoutSeconds: 15
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
