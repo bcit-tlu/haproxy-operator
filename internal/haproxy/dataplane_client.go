@@ -16,6 +16,15 @@ import (
 	"time"
 )
 
+const (
+	// defaultHTTPTimeout bounds every individual Dataplane API request.
+	defaultHTTPTimeout = 30 * time.Second
+	// dataplaneReadyTimeout bounds how long apply paths wait for the API to answer.
+	dataplaneReadyTimeout = 10 * time.Second
+	// readyPollInterval is the delay between readiness probes in waitForReady.
+	readyPollInterval = 250 * time.Millisecond
+)
+
 // APIConfig holds HAProxy Dataplane API connection details.
 type APIConfig struct {
 	BaseURL        string // e.g. https://haproxy:5555/v3
@@ -85,14 +94,7 @@ func NewClient(cfg APIConfig) (*Client, error) {
 		}
 	}
 
-	return &Client{
-		config:  cfg,
-		baseURL: u,
-		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport,
-		},
-	}, nil
+	return newClient(cfg, u, transport), nil
 }
 
 // NewClientWithTransport builds a client with a caller-supplied transport.
@@ -102,14 +104,18 @@ func NewClientWithTransport(cfg APIConfig, transport http.RoundTripper) (*Client
 	if err != nil {
 		return nil, err
 	}
+	return newClient(cfg, u, transport), nil
+}
+
+func newClient(cfg APIConfig, u *url.URL, transport http.RoundTripper) *Client {
 	return &Client{
 		config:  cfg,
 		baseURL: u,
 		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
+			Timeout:   defaultHTTPTimeout,
 			Transport: transport,
 		},
-	}, nil
+	}
 }
 
 // waitForReady polls the Data Plane API until it responds (or times out).
@@ -125,7 +131,7 @@ func (c *Client) waitForReady(ctx context.Context, timeout time.Duration) error 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(readyPollInterval):
 		}
 	}
 	if lastErr == nil {
@@ -136,7 +142,7 @@ func (c *Client) waitForReady(ctx context.Context, timeout time.Duration) error 
 
 // ApplyRawConfiguration validates then pushes raw haproxy.cfg content.
 func (c *Client) ApplyRawConfiguration(ctx context.Context, raw string) error {
-	if err := c.waitForReady(ctx, 10*time.Second); err != nil {
+	if err := c.waitForReady(ctx, dataplaneReadyTimeout); err != nil {
 		return fmt.Errorf("dataplane api not ready: %w", err)
 	}
 	if err := c.ValidateRawConfiguration(ctx, raw); err != nil {
@@ -149,7 +155,7 @@ func (c *Client) ApplyRawConfiguration(ctx context.Context, raw string) error {
 // already been validated by the caller. This avoids a redundant validation
 // round-trip when the reconciler has already called ValidateRawConfiguration.
 func (c *Client) ApplyRawConfigurationValidated(ctx context.Context, raw string) error {
-	if err := c.waitForReady(ctx, 10*time.Second); err != nil {
+	if err := c.waitForReady(ctx, dataplaneReadyTimeout); err != nil {
 		return fmt.Errorf("dataplane api not ready: %w", err)
 	}
 	return c.applyRaw(ctx, raw)
@@ -209,16 +215,8 @@ func (c *Client) Info(ctx context.Context) (string, error) {
 	return "", nil
 }
 
+// doRequest sends a JSON-encoded body (if non-nil) and decodes a JSON result.
 func (c *Client) doRequest(ctx context.Context, method, p string, body any, result any) error {
-	ref := *c.baseURL
-	ref.Path = path.Join(strings.TrimSuffix(c.baseURL.Path, "/"), strings.TrimPrefix(p, "/"))
-	ref.RawQuery = ""
-	if strings.Contains(p, "?") {
-		parts := strings.SplitN(p, "?", 2)
-		ref.Path = path.Join(strings.TrimSuffix(c.baseURL.Path, "/"), strings.TrimPrefix(parts[0], "/"))
-		ref.RawQuery = parts[1]
-	}
-
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -227,52 +225,35 @@ func (c *Client) doRequest(ctx context.Context, method, p string, body any, resu
 		}
 		r = bytes.NewReader(b)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, method, ref.String(), r)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.config.Username != "" {
-		req.SetBasicAuth(c.config.Username, c.config.Password)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return newAPIError(resp)
-	}
-
-	if result != nil && resp.StatusCode != http.StatusNoContent {
-		return json.NewDecoder(resp.Body).Decode(result)
-	}
-	return nil
+	return c.do(ctx, method, p, r, "application/json", result)
 }
 
+// doRequestPlain sends a raw text/plain body (haproxy.cfg content).
 func (c *Client) doRequestPlain(ctx context.Context, method, p string, body string, result any) error {
-	ref := *c.baseURL
-	ref.Path = path.Join(strings.TrimSuffix(c.baseURL.Path, "/"), strings.TrimPrefix(p, "/"))
-	ref.RawQuery = ""
-	if strings.Contains(p, "?") {
-		parts := strings.SplitN(p, "?", 2)
-		ref.Path = path.Join(strings.TrimSuffix(c.baseURL.Path, "/"), strings.TrimPrefix(parts[0], "/"))
-		ref.RawQuery = parts[1]
-	}
-
 	var r io.Reader
 	if body != "" {
-		r = bytes.NewReader([]byte(body))
+		r = strings.NewReader(body)
 	}
+	return c.do(ctx, method, p, r, "text/plain", result)
+}
 
-	req, err := http.NewRequestWithContext(ctx, method, ref.String(), r)
+// resolveURL joins p (which may carry its own query string) onto the base URL.
+func (c *Client) resolveURL(p string) string {
+	ref := *c.baseURL
+	rel, query, _ := strings.Cut(p, "?")
+	ref.Path = path.Join(strings.TrimSuffix(c.baseURL.Path, "/"), strings.TrimPrefix(rel, "/"))
+	ref.RawQuery = query
+	return ref.String()
+}
+
+// do owns the shared request lifecycle: URL resolution, auth, status
+// checking, error capture, and JSON decoding of the response.
+func (c *Client) do(ctx context.Context, method, p string, body io.Reader, contentType string, result any) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.resolveURL(p), body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("Content-Type", contentType)
 	if c.config.Username != "" {
 		req.SetBasicAuth(c.config.Username, c.config.Password)
 	}
@@ -312,8 +293,12 @@ const maxAPIErrorBody = 4096
 
 // newAPIError builds an APIError from an HTTP response, bounding the body.
 func newAPIError(resp *http.Response) *APIError {
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIErrorBody))
-	return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIErrorBody))
+	msg := string(b)
+	if err != nil {
+		msg = fmt.Sprintf("%s (error reading response body: %v)", msg, err)
+	}
+	return &APIError{StatusCode: resp.StatusCode, Message: msg}
 }
 
 func addOrReplaceQuery(p, key, value string) string {
