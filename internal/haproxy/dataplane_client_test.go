@@ -2,9 +2,13 @@ package haproxy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -128,5 +132,103 @@ func TestAPIError(t *testing.T) {
 	e := &APIError{StatusCode: 422, Message: "invalid config"}
 	if e.Error() != "dataplane api error (status 422): invalid config" {
 		t.Errorf("unexpected error string: %s", e.Error())
+	}
+}
+
+func TestResolveURL(t *testing.T) {
+	c, err := NewClient(APIConfig{BaseURL: "http://haproxy:5555/v3/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"/services/haproxy/info":          "http://haproxy:5555/v3/services/haproxy/info",
+		"services/haproxy/info":           "http://haproxy:5555/v3/services/haproxy/info",
+		"/configuration/raw?version=3":    "http://haproxy:5555/v3/configuration/raw?version=3",
+		"/raw?only_validate=true&version": "http://haproxy:5555/v3/raw?only_validate=true&version",
+	}
+	for in, want := range cases {
+		if got := c.resolveURL(in); got != want {
+			t.Errorf("resolveURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Both request wrappers must share URL resolution, auth, status handling and
+// decoding; only the body encoding and Content-Type may differ.
+func TestDoRequestVariantsSharePlumbing(t *testing.T) {
+	type seen struct {
+		path, query, contentType, auth, body string
+	}
+	var got seen
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got = seen{r.URL.Path, r.URL.RawQuery, r.Header.Get("Content-Type"), r.Header.Get("Authorization"), string(b)}
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = w.Write([]byte(`{"version":"3.2"}`))
+		} else {
+			_, _ = w.Write([]byte("nope"))
+		}
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(APIConfig{BaseURL: srv.URL + "/v3", Username: "u", Password: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("u:p"))
+
+	t.Run("json", func(t *testing.T) {
+		var out map[string]string
+		if err := c.doRequest(context.Background(), http.MethodPost, "/x?a=1", map[string]int{"n": 1}, &out); err != nil {
+			t.Fatal(err)
+		}
+		want := seen{"/v3/x", "a=1", "application/json", wantAuth, `{"n":1}`}
+		if got != want {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+		if out["version"] != "3.2" {
+			t.Errorf("decode failed: %+v", out)
+		}
+	})
+
+	t.Run("plain", func(t *testing.T) {
+		var out map[string]string
+		if err := c.doRequestPlain(context.Background(), http.MethodPost, "/x?a=1", "global\n", &out); err != nil {
+			t.Fatal(err)
+		}
+		want := seen{"/v3/x", "a=1", "text/plain", wantAuth, "global\n"}
+		if got != want {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+		if out["version"] != "3.2" {
+			t.Errorf("decode failed: %+v", out)
+		}
+	})
+
+	t.Run("non-2xx becomes APIError on both paths", func(t *testing.T) {
+		status = http.StatusBadRequest
+		for name, err := range map[string]error{
+			"json":  c.doRequest(context.Background(), http.MethodGet, "/x", nil, nil),
+			"plain": c.doRequestPlain(context.Background(), http.MethodGet, "/x", "", nil),
+		} {
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 || apiErr.Message != "nope" {
+				t.Errorf("%s: unexpected error %v", name, err)
+			}
+		}
+	})
+}
+
+type failingBody struct{}
+
+func (failingBody) Read([]byte) (int, error) { return 0, errors.New("boom") }
+func (failingBody) Close() error             { return nil }
+
+func TestNewAPIErrorSurfacesBodyReadError(t *testing.T) {
+	e := newAPIError(&http.Response{StatusCode: 500, Body: failingBody{}})
+	if !strings.Contains(e.Message, "boom") {
+		t.Errorf("expected read error in message, got %q", e.Message)
 	}
 }
