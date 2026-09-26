@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/bcit-tlu/haproxy-operator/compare/v0.4.0...v0.4.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **chart:** give readyz probe time for the mTLS dataplane check ([#25](https://github.com/bcit-tlu/haproxy-operator/issues/25)) ([81c88e6](https://github.com/bcit-tlu/haproxy-operator/commit/81c88e61b4d336a379d1223ed651cb86db357218))
+
 ## [0.4.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.3.0...v0.4.0) (2026-09-24)
 
 
