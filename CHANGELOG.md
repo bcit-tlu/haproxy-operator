@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.4.0...v0.5.0) (2026-10-01)
+
+
+### Features
+
+* **operator:** sync TLS Secrets to Dataplane ssl_certificates storage ([#29](https://github.com/bcit-tlu/haproxy-operator/issues/29)) ([9eeff63](https://github.com/bcit-tlu/haproxy-operator/commit/9eeff63e8fa07c89b52fd413ada5879169e39f6f))
+
+
+### Bug Fixes
+
+* **chart:** give readyz probe time for the mTLS dataplane check ([#25](https://github.com/bcit-tlu/haproxy-operator/issues/25)) ([81c88e6](https://github.com/bcit-tlu/haproxy-operator/commit/81c88e61b4d336a379d1223ed651cb86db357218))
+* **local:** log swallowed runner errors and hoist local-mode literals ([#28](https://github.com/bcit-tlu/haproxy-operator/issues/28)) ([6453bb4](https://github.com/bcit-tlu/haproxy-operator/commit/6453bb43569514066553c04ba248f5b412eea236))
+
 ## [0.4.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.3.0...v0.4.0) (2026-09-24)
 
 
