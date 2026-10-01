@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/bcit-tlu/haproxy-operator/compare/v0.5.1...v0.5.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* **release:** fall back to flat tag_name when dispatching publish jobs ([#32](https://github.com/bcit-tlu/haproxy-operator/issues/32)) ([7c4b2d1](https://github.com/bcit-tlu/haproxy-operator/commit/7c4b2d1d6e1060016a0bc4789f51e9b05858dea7))
+
 ## [0.5.1](https://github.com/bcit-tlu/haproxy-operator/compare/v0.5.0...v0.5.1) (2026-10-01)
 
 
