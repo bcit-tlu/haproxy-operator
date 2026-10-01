@@ -18,6 +18,12 @@ watchNamespace: haproxy-operator
 secretName: haproxy-config
 secretKey: haproxy.cfg
 
+# TLS Secrets in watchNamespace pushed to the gateway's Dataplane
+# ssl_certificates storage as <name>.pem before config validation — a
+# haproxy.cfg may then reference them via `crt <ssl_certs_dir>/<name>.pem`.
+# Rotation propagates automatically on the next VSO refresh.
+certsSecretNames: []
+
 # HAProxy Dataplane API connection.
 dataplane:
   url: "https://haproxy:5555/v3"

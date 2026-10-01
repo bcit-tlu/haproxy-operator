@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,10 @@ const (
 
 	// LastAppliedTimeAnnotation records the last successful apply time.
 	LastAppliedTimeAnnotation = "haproxy.operator/last-applied-time"
+
+	// LastSyncedCertHashAnnotation records the SHA256 of the PEM bundle last
+	// pushed to Dataplane ssl_certificates storage for a managed cert Secret.
+	LastSyncedCertHashAnnotation = "haproxy.operator/last-synced-cert-hash"
 
 	// RequeueInterval is the default periodic reconciliation interval.
 	RequeueInterval = 5 * time.Minute
@@ -118,6 +123,13 @@ type SecretReconciler struct {
 	SpireSocketPath string
 	Recorder        record.EventRecorder
 
+	// CertsSecretNames lists TLS Secrets in the watch namespace whose
+	// tls.crt(+ca.crt)/tls.key are pushed to Dataplane ssl_certificates
+	// storage as <name>.pem. They are synced before the config is validated
+	// so a haproxy.cfg referencing the crt file exists on the gateway first.
+	// Requires SecretName to be set.
+	CertsSecretNames []string
+
 	// haproxyClient is created lazily and reused across reconciliations.
 	haproxyClient *haproxy.Client
 	// spireSource holds the SPIRE X509Source for lifecycle management.
@@ -145,7 +157,8 @@ type SecretReconciler struct {
 func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx).WithValues("secret", req.NamespacedName)
 
-	if r.SecretName != "" && req.Name != r.SecretName {
+	isCert := slices.Contains(r.CertsSecretNames, req.Name)
+	if r.SecretName != "" && req.Name != r.SecretName && !isCert {
 		return ctrl.Result{}, nil
 	}
 
@@ -157,6 +170,38 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		log.Error(err, "unable to fetch Secret")
 		return ctrl.Result{}, err
+	}
+
+	// A managed TLS Secret event: push the bundle to Dataplane storage, then
+	// continue into the config reconcile — a pending haproxy.cfg may be
+	// waiting on this crt file to exist before it can validate.
+	if isCert {
+		if err := r.syncCertSecret(ctx, secret); err != nil {
+			class := haproxy.Classify(err)
+			log.Error(err, "certificate sync failed", "class", string(class))
+			metrics.TransientErrors.WithLabelValues(string(class)).Inc()
+			status.EmitEvent(r.Recorder, secret, status.CertSyncFailed, err.Error())
+			if uerr := r.failWithStatus(ctx, secret, "CertSync"+class.StatusValue(), err.Error()); uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+			r.transientFailures++
+			return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
+		}
+		if r.SecretName == "" {
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		}
+		req = ctrl.Request{NamespacedName: client.ObjectKey{Namespace: req.Namespace, Name: r.SecretName}}
+		secret = &corev1.Secret{}
+		if err := r.Get(ctx, req.NamespacedName, secret); err != nil {
+			if errors.IsNotFound(err) {
+				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+			}
+			return ctrl.Result{}, err
+		}
+		// The cert payload changed the validation context: a cfg previously
+		// rejected for a missing crt file may now pass. Clear the in-memory
+		// suppression (the outcome re-marks it if it still fails).
+		delete(secret.Annotations, LastFailedHashAnnotation)
 	}
 
 	if !r.shouldReconcile(secret) {
@@ -209,6 +254,25 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		r.transientFailures++
 		return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
+	}
+
+	// Push managed TLS Secrets to Dataplane storage before validating: a cfg
+	// referencing a crt file that does not exist yet is rejected outright,
+	// so certs must land first. Failures here are always transient — they
+	// never suppress the desired config hash.
+	if len(r.CertsSecretNames) > 0 {
+		metrics.ReconcileAttempts.WithLabelValues("cert-sync").Inc()
+		if err := r.ensureCertSecretsSynced(ctx, secret.Namespace, haproxyClient); err != nil {
+			class := haproxy.Classify(err)
+			log.Error(err, "certificate sync failed", "class", string(class))
+			metrics.TransientErrors.WithLabelValues(string(class)).Inc()
+			status.EmitEvent(r.Recorder, secret, eventReasonForClass(class), err.Error())
+			if uerr := r.failWithStatus(ctx, secret, "CertSync"+class.StatusValue(), err.Error()); uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+			r.transientFailures++
+			return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
+		}
 	}
 
 	log.Info("configuration changed, validating",

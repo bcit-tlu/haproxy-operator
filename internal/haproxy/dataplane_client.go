@@ -3,11 +3,16 @@ package haproxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -192,6 +197,89 @@ func (c *Client) getConfigVersion(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// storageSSLCertificate is the subset of the Dataplane API's ssl_certificate
+// model used for change detection — the storage API reports parsed metadata,
+// not the stored PEM bytes.
+type storageSSLCertificate struct {
+	SHA256FingerPrint string `json:"sha256_finger_print"`
+}
+
+// SyncSSLCertificate ensures the Dataplane ssl_certificates storage holds pem
+// under name (e.g. "star-ltc-bcit-ca.pem", landing at ssl_certs_dir/name on
+// the gateway host). Returns true when the remote object was created or
+// replaced; a remote copy whose leaf certificate fingerprint matches the
+// bundle's is left untouched. Writes omit skip_reload so a rotated
+// certificate reloads HAProxy even when haproxy.cfg itself is unchanged.
+func (c *Client) SyncSSLCertificate(ctx context.Context, name string, pemBytes []byte) (bool, error) {
+	localFP, err := leafSHA256Fingerprint(pemBytes)
+	if err != nil {
+		return false, err
+	}
+	if err := c.waitForReady(ctx, dataplaneReadyTimeout); err != nil {
+		return false, fmt.Errorf("dataplane api not ready: %w", err)
+	}
+
+	endpoint := "/services/haproxy/storage/ssl_certificates/" + url.PathEscape(name)
+	var remote storageSSLCertificate
+	err = c.doRequest(ctx, http.MethodGet, endpoint, nil, &remote)
+	switch {
+	case isNotFound(err):
+		return true, c.createSSLCertificate(ctx, name, pemBytes)
+	case err != nil:
+		return false, err
+	case fingerprintsEqual(remote.SHA256FingerPrint, localFP):
+		return false, nil
+	default:
+		return true, c.doRequestPlain(ctx, http.MethodPut, endpoint, string(pemBytes), nil)
+	}
+}
+
+// createSSLCertificate uploads pem via a multipart file_upload part; the
+// submitted filename becomes the storage name on the gateway.
+func (c *Client) createSSLCertificate(ctx context.Context, name string, pemBytes []byte) error {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, err := w.CreateFormFile("file_upload", name)
+	if err != nil {
+		return fmt.Errorf("build multipart upload: %w", err)
+	}
+	if _, err := part.Write(pemBytes); err != nil {
+		return fmt.Errorf("build multipart upload: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("build multipart upload: %w", err)
+	}
+	return c.do(ctx, http.MethodPost, "/services/haproxy/storage/ssl_certificates", &buf, w.FormDataContentType(), nil)
+}
+
+// leafSHA256Fingerprint returns the lowercase hex SHA-256 of the first
+// CERTIFICATE block in pemBytes — the same digest the storage API reports as
+// sha256_finger_print for a stored file.
+func leafSHA256Fingerprint(pemBytes []byte) (string, error) {
+	for rest := pemBytes; ; {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			return "", errors.New("no CERTIFICATE block found in PEM bundle")
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return "", fmt.Errorf("parse leaf certificate: %w", err)
+		}
+		sum := sha256.Sum256(cert.Raw)
+		return hex.EncodeToString(sum[:]), nil
+	}
+}
+
+// fingerprintsEqual compares a Dataplane-reported fingerprint (which may use
+// uppercase hex or colon separators) with our lowercase hex digest.
+func fingerprintsEqual(reported, local string) bool {
+	return strings.EqualFold(strings.ReplaceAll(reported, ":", ""), local)
+}
+
 // --- HTTP plumbing ---
 
 // Ping performs a lightweight authenticated probe (configuration version)
@@ -299,6 +387,11 @@ func newAPIError(resp *http.Response) *APIError {
 		msg = fmt.Sprintf("%s (error reading response body: %v)", msg, err)
 	}
 	return &APIError{StatusCode: resp.StatusCode, Message: msg}
+}
+
+func isNotFound(err error) bool {
+	var e *APIError
+	return errors.As(err, &e) && e.StatusCode == http.StatusNotFound
 }
 
 func addOrReplaceQuery(p, key, value string) string {

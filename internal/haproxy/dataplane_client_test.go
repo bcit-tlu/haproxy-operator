@@ -2,14 +2,23 @@ package haproxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewClient(t *testing.T) {
@@ -231,4 +240,136 @@ func TestNewAPIErrorSurfacesBodyReadError(t *testing.T) {
 	if !strings.Contains(e.Message, "boom") {
 		t.Errorf("expected read error in message, got %q", e.Message)
 	}
+}
+
+// testCertPEM returns a fresh self-signed certificate PEM for storage tests.
+func testCertPEM(t *testing.T, cn string) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func TestSyncSSLCertificate(t *testing.T) {
+	pemBytes := testCertPEM(t, "test.ltc.bcit.ca")
+	wantFP, err := leafSHA256Fingerprint(pemBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type recordedCall struct{ method, path, contentType, filename string }
+	serve := func(remoteFP string, remoteExists bool, calls *[]recordedCall) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/configuration/version"):
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, "1")
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/storage/ssl_certificates/star.pem"):
+				if !remoteExists {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{"sha256_finger_print": remoteFP})
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/storage/ssl_certificates"):
+				_, hdr, err := r.FormFile("file_upload")
+				if err != nil {
+					t.Errorf("multipart file_upload missing: %v", err)
+				}
+				*calls = append(*calls, recordedCall{r.Method, r.URL.Path, r.Header.Get("Content-Type"), hdr.Filename})
+				w.WriteHeader(http.StatusCreated)
+			case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/storage/ssl_certificates/star.pem"):
+				*calls = append(*calls, recordedCall{r.Method, r.URL.Path, r.Header.Get("Content-Type"), ""})
+				w.WriteHeader(http.StatusOK)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+
+	t.Run("creates via multipart when missing", func(t *testing.T) {
+		var calls []recordedCall
+		srv := serve("", false, &calls)
+		defer srv.Close()
+		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes)
+		if err != nil || !changed {
+			t.Fatalf("changed=%v err=%v", changed, err)
+		}
+		if len(calls) != 1 || calls[0].method != http.MethodPost {
+			t.Fatalf("expected one POST, got %+v", calls)
+		}
+		if calls[0].filename != "star.pem" {
+			t.Errorf("multipart filename = %q, want star.pem (becomes storage name)", calls[0].filename)
+		}
+		if !strings.HasPrefix(calls[0].contentType, "multipart/form-data") {
+			t.Errorf("content-type = %q", calls[0].contentType)
+		}
+	})
+
+	t.Run("skips when fingerprint matches", func(t *testing.T) {
+		var calls []recordedCall
+		// Dataplane may report colon-separated uppercase hex — normalization
+		// must still match our lowercase digest.
+		srv := serve(strings.Join(splitEvery(strings.ToUpper(wantFP), 2), ":"), true, &calls)
+		defer srv.Close()
+		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes)
+		if err != nil || changed {
+			t.Fatalf("changed=%v err=%v", changed, err)
+		}
+		if len(calls) != 0 {
+			t.Errorf("expected no writes, got %+v", calls)
+		}
+	})
+
+	t.Run("replaces via PUT when fingerprint differs", func(t *testing.T) {
+		var calls []recordedCall
+		srv := serve("deadbeef", true, &calls)
+		defer srv.Close()
+		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes)
+		if err != nil || !changed {
+			t.Fatalf("changed=%v err=%v", changed, err)
+		}
+		if len(calls) != 1 || calls[0].method != http.MethodPut || calls[0].contentType != "text/plain" {
+			t.Fatalf("expected one PUT text/plain, got %+v", calls)
+		}
+	})
+
+	t.Run("rejects garbage pem", func(t *testing.T) {
+		var calls []recordedCall
+		srv := serve("", false, &calls)
+		defer srv.Close()
+		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+		if _, err := c.SyncSSLCertificate(context.Background(), "x.pem", []byte("not pem")); err == nil {
+			t.Fatal("expected error for non-PEM input")
+		}
+	})
+}
+
+func splitEvery(s string, n int) []string {
+	var out []string
+	for len(s) > 0 {
+		k := n
+		if len(s) < n {
+			k = len(s)
+		}
+		out = append(out, s[:k])
+		s = s[k:]
+	}
+	return out
 }
