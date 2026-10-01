@@ -193,3 +193,24 @@ jobs:
           cosign sign --yes "${IMAGE_BASE}/${CHART_NAME}@${DIGEST}"
 
           echo "::endgroup::"
+
+  # ── Aggregate gate ─────────────────────────────────────────
+  #
+  # The default-branch ruleset requires a single check named `validate`.
+  # Keep this job name STABLE — renaming it silently breaks branch
+  # protection for every open PR. `if: always()` + the needs-result check
+  # makes it fail when any real gate fails (a plain `needs:` would skip it
+  # instead).
+  validate:
+    if: always()
+    needs: [go-test, helm-lint, build-haproxy-operator]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all gates passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq .
+          echo "$NEEDS" | jq -e \
+            'to_entries | all(.value.result == "success")' \
+            >/dev/null
