@@ -1,0 +1,2 @@
+# Local git worktrees (see .gitignore); never part of the build context.
+.worktrees/
