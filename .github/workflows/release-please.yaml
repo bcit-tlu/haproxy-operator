@@ -88,6 +88,11 @@ jobs:
           set -euo pipefail
           for path in $(jq -r '.[]' <<<"${PATHS_RELEASED}"); do
             tag=$(jq -r --arg key "${path}--tag_name" '.[$key] // empty' <<<"${RP_OUTPUTS}")
+            if [[ -z "${tag}" && "${path}" == "." ]]; then
+              # Single-package root: release-please emits a flat top-level
+              # `tag_name` instead of a `.--tag_name` per-path key.
+              tag=$(jq -r '.tag_name // empty' <<<"${RP_OUTPUTS}")
+            fi
             if [[ -z "${tag}" ]]; then
               echo "::warning::No tag_name output for path '${path}', skipping"
               continue
