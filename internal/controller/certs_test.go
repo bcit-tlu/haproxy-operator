@@ -83,7 +83,7 @@ func newStorageDataplane(t *testing.T) *storageDataplane {
 			case http.MethodGet:
 				if fd.storage[r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]] {
 					w.Header().Set("Content-Type", "application/json")
-					fmt.Fprint(w, `{"sha256_finger_print":"never-matches"}`)
+					fmt.Fprint(w, `{"serial":"0"}`)
 					return
 				}
 				w.WriteHeader(http.StatusNotFound)
