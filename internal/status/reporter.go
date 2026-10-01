@@ -24,6 +24,8 @@ const (
 	ConflictError    = "ConflictError"
 	TransientError   = "TransientError"
 	ConfigUnchanged  = "ConfigUnchanged"
+	CertSynced       = "CertSynced"
+	CertSyncFailed   = "CertSyncFailed"
 )
 
 // warningReasons are emitted as Warning events; everything else is Normal.
@@ -36,6 +38,7 @@ var warningReasons = map[string]bool{
 	ConnectionError:  true,
 	ConflictError:    true,
 	TransientError:   true,
+	CertSyncFailed:   true,
 }
 
 // maxEventMessage bounds the message written into an Event. Dataplane

@@ -72,6 +72,7 @@ curl http://localhost:8404    # HAProxy stats
 | `--namespace` / `WATCH_NAMESPACE` | `haproxy-operator` | K8s namespace to watch |
 | `--secret-name` / `SECRET_NAME` | `haproxy-config` | Secret containing haproxy.cfg |
 | `--secret-key` / `SECRET_KEY` | `haproxy.cfg` | Key within the Secret |
+| `--certs-secret-names` / `CERTS_SECRET_NAMES` | — | Comma-separated TLS Secrets pushed to Dataplane `ssl_certificates` storage as `<name>.pem` before config validation |
 | `--dataplane-url` / `DATAPLANE_URL` | `https://haproxy:5555/v3` | Dataplane API base URL |
 | `--spire-socket` / `SPIRE_AGENT_SOCKET` | — | SPIRE Workload API socket |
 | `--leader-elect` / `LEADER_ELECT` | `false` | Enable leader election |
@@ -87,6 +88,10 @@ When SPIRE is enabled (`spire.enabled=true`), the operator obtains X.509 SVIDs f
 ### Static TLS Certificates
 
 When SPIRE is not enabled, the operator mounts TLS certificates from a Kubernetes Secret (`haproxy-operator-tls`). Pre-provision this Secret with `ca.crt`, `tls.crt`, and `tls.key` for mTLS communication with the Dataplane API.
+
+### Frontend Certificate Sync
+
+`--certs-secret-names` lists `kubernetes.io/tls` Secrets (same watch namespace, e.g. VSO-synced from a Vault KV path) whose `tls.crt` + `tls.key` (+ optional `ca.crt` chain) are pushed to the gateway's Dataplane `ssl_certificates` storage as `<secret-name>.pem`. Syncs run before every config validation so a `haproxy.cfg` may safely reference `crt <ssl_certs_dir>/<name>.pem`, and secret updates trigger a reload via the storage API even when the config is unchanged. Requires the Dataplane API to have `ssl_certs_dir` configured.
 
 ## Project Structure
 

@@ -46,6 +46,9 @@ spec:
             - --namespace={{ .Values.watchNamespace }}
             - --secret-name={{ .Values.secretName }}
             - --secret-key={{ .Values.secretKey }}
+            {{- if .Values.certsSecretNames }}
+            - --certs-secret-names={{ join "," .Values.certsSecretNames }}
+            {{- end }}
             - --dataplane-url={{ .Values.dataplane.url }}
             {{- if .Values.dataplane.insecure }}
             - --dataplane-insecure=true

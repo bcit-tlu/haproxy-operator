@@ -5,6 +5,7 @@ import (
 	"flag"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bcit-tlu/haproxy-operator/internal/controller"
@@ -45,6 +46,7 @@ func main() {
 		watchNamespace       string
 		secretName           string
 		secretKey            string
+		certsSecretNames     string
 		localConfigPath      string
 		localWatch           bool
 		localPoll            time.Duration
@@ -69,7 +71,9 @@ func main() {
 	flag.StringVar(&secretName, "secret-name", envOr("SECRET_NAME", ""),
 		"Name of the Secret containing the haproxy.cfg")
 	flag.StringVar(&secretKey, "secret-key", envOr("SECRET_KEY", "haproxy.cfg"),
-		"Key in the Secret containing the haproxy.cfg")
+		"Key within the watched Secret containing the haproxy.cfg content")
+	flag.StringVar(&certsSecretNames, "certs-secret-names", envOr("CERTS_SECRET_NAMES", ""),
+		"Comma-separated TLS Secret names (watch namespace) synced to Dataplane ssl_certificates storage as <name>.pem before config validation")
 	flag.StringVar(&localConfigPath, "local-config-path", envOr("LOCAL_CONFIG_PATH", ""),
 		"Path to haproxy.cfg to apply in local mode")
 	flag.BoolVar(&localWatch, "local-watch", envOr("LOCAL_WATCH", "true") == "true",
@@ -149,6 +153,7 @@ func main() {
 		"namespace", watchNamespace,
 		"secretName", secretName,
 		"secretKey", secretKey,
+		"certsSecretNames", certsSecretNames,
 		"dataplaneURL", dataplaneURL,
 		"spireSocket", spireSocketPath,
 	)
@@ -183,6 +188,15 @@ func main() {
 		SecretName:      secretName,
 		SecretKey:       secretKey,
 		SpireSocketPath: spireSocketPath,
+		CertsSecretNames: func() []string {
+			var out []string
+			for _, n := range strings.Split(certsSecretNames, ",") {
+				if n = strings.TrimSpace(n); n != "" {
+					out = append(out, n)
+				}
+			}
+			return out
+		}(),
 		APIConfig: haproxy.APIConfig{
 			BaseURL:        dataplaneURL,
 			CACertPath:     dataplaneCACert,
