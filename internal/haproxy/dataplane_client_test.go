@@ -265,13 +265,13 @@ func testCertPEM(t *testing.T, cn string) []byte {
 
 func TestSyncSSLCertificate(t *testing.T) {
 	pemBytes := testCertPEM(t, "test.ltc.bcit.ca")
-	wantFP, err := leafSHA256Fingerprint(pemBytes)
+	wantSerial, err := leafSerial(pemBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	type recordedCall struct{ method, path, contentType, filename string }
-	serve := func(remoteFP string, remoteExists bool, calls *[]recordedCall) *httptest.Server {
+	serve := func(remoteSerial string, remoteExists bool, calls *[]recordedCall) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/configuration/version"):
@@ -283,7 +283,7 @@ func TestSyncSSLCertificate(t *testing.T) {
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{"sha256_finger_print": remoteFP})
+				json.NewEncoder(w).Encode(map[string]any{"serial": remoteSerial})
 			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/storage/ssl_certificates"):
 				_, hdr, err := r.FormFile("file_upload")
 				if err != nil {
@@ -320,11 +320,9 @@ func TestSyncSSLCertificate(t *testing.T) {
 		}
 	})
 
-	t.Run("skips when fingerprint matches", func(t *testing.T) {
+	t.Run("skips when serial matches", func(t *testing.T) {
 		var calls []recordedCall
-		// Dataplane may report colon-separated uppercase hex — normalization
-		// must still match our lowercase digest.
-		srv := serve(strings.Join(splitEvery(strings.ToUpper(wantFP), 2), ":"), true, &calls)
+		srv := serve(wantSerial, true, &calls)
 		defer srv.Close()
 		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
 		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes)
@@ -336,7 +334,7 @@ func TestSyncSSLCertificate(t *testing.T) {
 		}
 	})
 
-	t.Run("replaces via PUT when fingerprint differs", func(t *testing.T) {
+	t.Run("replaces via PUT when serial differs", func(t *testing.T) {
 		var calls []recordedCall
 		srv := serve("deadbeef", true, &calls)
 		defer srv.Close()
@@ -359,17 +357,4 @@ func TestSyncSSLCertificate(t *testing.T) {
 			t.Fatal("expected error for non-PEM input")
 		}
 	})
-}
-
-func splitEvery(s string, n int) []string {
-	var out []string
-	for len(s) > 0 {
-		k := n
-		if len(s) < n {
-			k = len(s)
-		}
-		out = append(out, s[:k])
-		s = s[k:]
-	}
-	return out
 }
