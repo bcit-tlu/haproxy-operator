@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/bcit-tlu/haproxy-operator/compare/v0.5.0...v0.5.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **dataplane:** compare leaf serial, not sha256_finger_print ([#30](https://github.com/bcit-tlu/haproxy-operator/issues/30)) ([4a1a9b1](https://github.com/bcit-tlu/haproxy-operator/commit/4a1a9b1f795709873bd9d7e7e9384596c8219eb8))
+
 ## [0.5.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.4.0...v0.5.0) (2026-10-01)
 
 
