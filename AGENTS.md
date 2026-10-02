@@ -37,6 +37,8 @@
 ## Development Workflow
 
 - Create feature branches from `main`
+- Do issue/PR work in a git worktree, not the main checkout: `git fetch origin && git worktree add .worktrees/<name> -b <type>/<issue>-<slug> origin/main` (`.worktrees/` is gitignored)
+- Keep the main checkout on a clean, up-to-date `main`; after the PR merges, `git worktree remove .worktrees/<name>` (`git worktree prune` clears stale registrations)
 - Use pull requests for code review
 - CI runs: go test, go vet, helm lint, Docker build
 - Release Please manages versioning and changelogs
