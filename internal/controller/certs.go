@@ -51,22 +51,24 @@ func (r *SecretReconciler) ensureCertSecretsSynced(ctx context.Context, namespac
 }
 
 // pushCertSecret assembles the PEM bundle and writes it to Dataplane storage
-// as <secret-name>.pem, skipping the write when the stored leaf fingerprint
-// already matches. The pushed hash is annotated on the Secret for
-// observability; the remote fingerprint check — not the annotation — decides
-// whether a write is needed, so a file removed out-of-band is re-pushed.
+// as <secret-name>.pem. The write is skipped only when the remote object
+// matches on leaf serial and file size AND the recorded last-pushed bundle
+// hash still equals the bundle being offered — either side's signal alone
+// can miss a change (same-length chain swaps fool remote metadata; a file
+// removed out-of-band fools the annotation).
 func (r *SecretReconciler) pushCertSecret(ctx context.Context, haproxyClient *haproxy.Client, secret *corev1.Secret) (bool, error) {
 	pemBundle, err := certPEMBundle(secret)
 	if err != nil {
 		return false, err
 	}
 	storageName := secret.Name + ".pem"
-	changed, err := haproxyClient.SyncSSLCertificate(ctx, storageName, pemBundle)
+	hash := config.HashBytes(pemBundle)
+	previouslySynced := secret.Annotations[LastSyncedCertHashAnnotation] == hash
+	changed, err := haproxyClient.SyncSSLCertificate(ctx, storageName, pemBundle, previouslySynced)
 	if err != nil {
 		return false, err
 	}
 
-	hash := config.HashBytes(pemBundle)
 	if changed || secret.Annotations[LastSyncedCertHashAnnotation] != hash {
 		if perr := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
 			ann[LastSyncedCertHashAnnotation] = hash
