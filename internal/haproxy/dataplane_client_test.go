@@ -271,7 +271,7 @@ func TestSyncSSLCertificate(t *testing.T) {
 	}
 
 	type recordedCall struct{ method, path, contentType, filename string }
-	serve := func(remoteSerial string, remoteExists bool, calls *[]recordedCall) *httptest.Server {
+	serve := func(remote map[string]any, remoteExists bool, calls *[]recordedCall) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/configuration/version"):
@@ -283,7 +283,7 @@ func TestSyncSSLCertificate(t *testing.T) {
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{"serial": remoteSerial})
+				json.NewEncoder(w).Encode(remote)
 			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/storage/ssl_certificates"):
 				_, hdr, err := r.FormFile("file_upload")
 				if err != nil {
@@ -302,10 +302,10 @@ func TestSyncSSLCertificate(t *testing.T) {
 
 	t.Run("creates via multipart when missing", func(t *testing.T) {
 		var calls []recordedCall
-		srv := serve("", false, &calls)
+		srv := serve(nil, false, &calls)
 		defer srv.Close()
 		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
-		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes)
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes, true)
 		if err != nil || !changed {
 			t.Fatalf("changed=%v err=%v", changed, err)
 		}
@@ -322,10 +322,10 @@ func TestSyncSSLCertificate(t *testing.T) {
 
 	t.Run("skips when serial matches", func(t *testing.T) {
 		var calls []recordedCall
-		srv := serve(wantSerial, true, &calls)
+		srv := serve(map[string]any{"serial": wantSerial}, true, &calls)
 		defer srv.Close()
 		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
-		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes)
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes, true)
 		if err != nil || changed {
 			t.Fatalf("changed=%v err=%v", changed, err)
 		}
@@ -334,12 +334,56 @@ func TestSyncSSLCertificate(t *testing.T) {
 		}
 	})
 
-	t.Run("replaces via PUT when serial differs", func(t *testing.T) {
+	t.Run("skips when serial and size match", func(t *testing.T) {
 		var calls []recordedCall
-		srv := serve("deadbeef", true, &calls)
+		srv := serve(map[string]any{"serial": wantSerial, "size": len(pemBytes)}, true, &calls)
 		defer srv.Close()
 		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
-		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes)
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes, true)
+		if err != nil || changed {
+			t.Fatalf("changed=%v err=%v", changed, err)
+		}
+		if len(calls) != 0 {
+			t.Errorf("expected no writes, got %+v", calls)
+		}
+	})
+
+	t.Run("replaces via PUT when serial matches but size differs", func(t *testing.T) {
+		var calls []recordedCall
+		srv := serve(map[string]any{"serial": wantSerial, "size": len(pemBytes) + 1}, true, &calls)
+		defer srv.Close()
+		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes, true)
+		if err != nil || !changed {
+			t.Fatalf("changed=%v err=%v", changed, err)
+		}
+		if len(calls) != 1 || calls[0].method != http.MethodPut || calls[0].contentType != "text/plain" {
+			t.Fatalf("expected one PUT text/plain, got %+v", calls)
+		}
+	})
+
+	t.Run("replaces via PUT when remote matches but bundle is new", func(t *testing.T) {
+		// Same-length chain swap: remote metadata is indistinguishable,
+		// so the last-synced hash is the only change signal.
+		var calls []recordedCall
+		srv := serve(map[string]any{"serial": wantSerial, "size": len(pemBytes)}, true, &calls)
+		defer srv.Close()
+		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes, false)
+		if err != nil || !changed {
+			t.Fatalf("changed=%v err=%v", changed, err)
+		}
+		if len(calls) != 1 || calls[0].method != http.MethodPut || calls[0].contentType != "text/plain" {
+			t.Fatalf("expected one PUT text/plain, got %+v", calls)
+		}
+	})
+
+	t.Run("replaces via PUT when serial differs", func(t *testing.T) {
+		var calls []recordedCall
+		srv := serve(map[string]any{"serial": "deadbeef", "size": len(pemBytes)}, true, &calls)
+		defer srv.Close()
+		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+		changed, err := c.SyncSSLCertificate(context.Background(), "star.pem", pemBytes, true)
 		if err != nil || !changed {
 			t.Fatalf("changed=%v err=%v", changed, err)
 		}
@@ -350,10 +394,10 @@ func TestSyncSSLCertificate(t *testing.T) {
 
 	t.Run("rejects garbage pem", func(t *testing.T) {
 		var calls []recordedCall
-		srv := serve("", false, &calls)
+		srv := serve(nil, false, &calls)
 		defer srv.Close()
 		c, _ := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
-		if _, err := c.SyncSSLCertificate(context.Background(), "x.pem", []byte("not pem")); err == nil {
+		if _, err := c.SyncSSLCertificate(context.Background(), "x.pem", []byte("not pem"), false); err == nil {
 			t.Fatal("expected error for non-PEM input")
 		}
 	})

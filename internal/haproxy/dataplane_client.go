@@ -202,15 +202,21 @@ func (c *Client) getConfigVersion(ctx context.Context) (int, error) {
 // certificate under a stable issuer, which is all the managed use needs.
 type storageSSLCertificate struct {
 	Serial string `json:"serial"`
+	Size   int64  `json:"size"`
 }
 
 // SyncSSLCertificate ensures the Dataplane ssl_certificates storage holds pem
 // under name (e.g. "star-ltc-bcit-ca.pem", landing at ssl_certs_dir/name on
 // the gateway host). Returns true when the remote object was created or
-// replaced; a remote copy whose leaf certificate serial matches the
-// bundle's is left untouched. Writes omit skip_reload so a rotated
-// certificate reloads HAProxy even when haproxy.cfg itself is unchanged.
-func (c *Client) SyncSSLCertificate(ctx context.Context, name string, pemBytes []byte) (bool, error) {
+// replaced. A remote copy is left untouched only when (a) every field the
+// GET reports matches the local bundle — leaf serial plus, when reported,
+// the stored file size — and (b) previouslySynced indicates the caller's
+// recorded hash of the last pushed bundle equals this bundle's hash. The
+// size check catches most chain changes under an unchanged leaf serial;
+// the hash guard closes the remaining same-length swap case. Writes omit
+// skip_reload so a rotated certificate reloads HAProxy even when
+// haproxy.cfg itself is unchanged.
+func (c *Client) SyncSSLCertificate(ctx context.Context, name string, pemBytes []byte, previouslySynced bool) (bool, error) {
 	localSerial, err := leafSerial(pemBytes)
 	if err != nil {
 		return false, err
@@ -227,7 +233,7 @@ func (c *Client) SyncSSLCertificate(ctx context.Context, name string, pemBytes [
 		return true, c.createSSLCertificate(ctx, name, pemBytes)
 	case err != nil:
 		return false, err
-	case remote.Serial != "" && remote.Serial == localSerial:
+	case remote.Serial != "" && remote.Serial == localSerial && (remote.Size == 0 || remote.Size == int64(len(pemBytes))) && previouslySynced:
 		return false, nil
 	default:
 		return true, c.doRequestPlain(ctx, http.MethodPut, endpoint, string(pemBytes), nil)
