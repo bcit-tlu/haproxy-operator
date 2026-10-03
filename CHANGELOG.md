@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/bcit-tlu/haproxy-operator/compare/v0.5.2...v0.5.3) (2026-10-03)
+
+
+### Bug Fixes
+
+* **dataplane:** detect chain-only changes in cert storage sync ([#37](https://github.com/bcit-tlu/haproxy-operator/issues/37)) ([9d229e8](https://github.com/bcit-tlu/haproxy-operator/commit/9d229e80c1fe839f8c75a925d84c36a2e125578c))
+
 ## [0.5.2](https://github.com/bcit-tlu/haproxy-operator/compare/v0.5.1...v0.5.2) (2026-10-01)
 
 
