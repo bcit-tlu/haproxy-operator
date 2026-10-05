@@ -114,3 +114,13 @@ func TestStartClientCertWatcherUpdatesOnFileChange(t *testing.T) {
 		got = testutil.ToFloat64(DataplaneClientCertExpiry)
 	}
 }
+
+// The insecure gauge must be scrapeable the moment the flag is set — it is
+// the alertable surface for "TLS verification is off" outside Helm.
+func TestDataplaneInsecureGauge(t *testing.T) {
+	DataplaneInsecure.Set(1)
+	if got := testutil.ToFloat64(DataplaneInsecure); got != 1 {
+		t.Fatalf("dataplane_insecure = %v, want 1", got)
+	}
+	DataplaneInsecure.Set(0)
+}

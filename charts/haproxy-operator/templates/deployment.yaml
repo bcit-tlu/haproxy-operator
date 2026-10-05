@@ -4,6 +4,9 @@
 {{- if and .Values.dataplane.auth.secretName (or (not .Values.dataplane.auth.usernameKey) (not .Values.dataplane.auth.passwordKey)) }}
 {{- fail "dataplane.auth.secretName requires usernameKey and passwordKey" }}
 {{- end }}
+{{- if and .Values.dataplane.insecure (or .Values.vault.enabled .Values.spire.enabled) }}
+{{- fail "dataplane.insecure cannot be combined with vault.enabled or spire.enabled" }}
+{{- end }}
 {{- if and (not .Values.spire.enabled) (not .Values.vault.enabled) (not .Values.dataplane.tls.existingSecret) }}
 {{- fail "dataplane.tls.existingSecret is required when neither vault.enabled nor spire.enabled is set" }}
 {{- end }}
@@ -59,7 +62,7 @@ spec:
             - --certs-secret-names={{ join "," .Values.certsSecretNames }}
             {{- end }}
             - --dataplane-url={{ .Values.dataplane.url }}
-            {{- if .Values.dataplane.insecure }}
+                        {{- if .Values.dataplane.insecure }}
             - --dataplane-insecure=true
             {{- end }}
             {{- if not .Values.spire.enabled }}

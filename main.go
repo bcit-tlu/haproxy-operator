@@ -105,9 +105,16 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	ctx := ctrl.SetupSignalHandler()
+
 	// Feed the server-certificate expiry gauge from every Dataplane TLS
 	// response (works for both file-based and SPIRE transports).
 	haproxy.ServerCertObserver = metrics.ObserveDataplaneServerCert
+
+	if dataplaneInsecure {
+		metrics.DataplaneInsecure.Set(1)
+		go warnDataplaneInsecure(ctx)
+	}
 
 	if mode == "k8s" {
 		if watchNamespace == "" {
@@ -153,7 +160,6 @@ func main() {
 			Watch:     localWatch,
 		}
 
-		ctx := ctrl.SetupSignalHandler()
 		if err := runner.Run(ctx); err != nil && err != context.Canceled {
 			setupLog.Error(err, "local runner exited with error")
 			os.Exit(1)
@@ -231,13 +237,30 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	ctx := ctrl.SetupSignalHandler()
 	if dataplaneClientCert != "" {
 		go metrics.StartClientCertWatcher(ctx, dataplaneClientCert, clientCertCheckInterval)
 	}
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+// warnDataplaneInsecure keeps --dataplane-insecure loud for as long as it
+// is active: a Warn immediately and once per minute until shutdown, so the
+// mode is never silent in logs even though the gauge already covers alerts.
+func warnDataplaneInsecure(ctx context.Context) {
+	const msg = "--dataplane-insecure is set: TLS verification to the Dataplane API is DISABLED (local development only)"
+	setupLog.Info(msg)
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			setupLog.Info(msg)
+		}
 	}
 }
 
