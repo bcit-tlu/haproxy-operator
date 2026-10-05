@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -273,6 +274,104 @@ func TestServerCertExpiryGauge(t *testing.T) {
 	want := float64(srv.Certificate().NotAfter.Unix())
 	if got := testutil.ToFloat64(metrics.DataplaneServerCertExpiry.WithLabelValues(gateway)); got != want {
 		t.Errorf("server cert gauge = %v, want %v", got, want)
+	}
+}
+
+// The server-CA file must verify a gateway leaf on its own — a PEM holding
+// ONLY the issuing CA (what the vaultPKI source renders from cert/ca), with
+// no client-chain material (bcit-tlu/haproxy-operator#39).
+func TestServerIssuerOnlyCAFile(t *testing.T) {
+	// Issuing CA + a gateway leaf signed by it.
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(100),
+		Subject:               pkix.Name{CommonName: "pki-haproxy Intermediate"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(101),
+		Subject:               pkix.Name{CommonName: "gw.test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		BasicConstraintsValid: true,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, ca, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, "1")
+	}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}}}
+	srv.StartTLS()
+	defer srv.Close()
+
+	// CA file holds ONLY the issuer PEM — no leaf, no chain, no client CA.
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	certPath, keyPath, _ := writeTestCertKeyPair(t, dir, 1)
+
+	c, err := NewClient(APIConfig{
+		BaseURL:        srv.URL,
+		CACertPath:     caFile,
+		ClientCertPath: certPath,
+		ClientKeyPath:  keyPath,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("ping with server-issuer CA: %v", err)
+	}
+
+	// Rotate the file to a different CA (e.g. a dedicated client issuer
+	// under vault#69): the SAME cached client must re-read it on the next
+	// handshake — a static RootCAs pool would keep trusting the old issuer
+	// (Devin Review #47). CloseClientConnections forces a fresh handshake.
+	srv.CloseClientConnections()
+	wrongCA := testCertPEM(t, "client issuer")
+	if err := os.WriteFile(caFile, wrongCA, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Ping(context.Background()); err == nil {
+		t.Fatal("expected ping to fail after the CA file rotated to the wrong issuer")
+	}
+
+	// Restoring the right CA verifies the cached client recovers too.
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.CloseClientConnections()
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("ping after CA restore: %v", err)
 	}
 }
 

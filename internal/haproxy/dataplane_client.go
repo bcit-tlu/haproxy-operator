@@ -80,15 +80,46 @@ func NewClient(cfg APIConfig) (*Client, error) {
 		}
 
 		if cfg.CACertPath != "" {
-			caPEM, err := os.ReadFile(cfg.CACertPath)
-			if err != nil {
-				return nil, fmt.Errorf("read dataplane CA: %w", err)
+			// Validate once at startup so misconfigured mounts fail fast,
+			// then rebuild the pool on every handshake: the mounted file is
+			// re-projected when an external Secret/ConfigMap rotates and the
+			// reconciler caches this client for the process's life — a
+			// static RootCAs would pin the first-loaded CA forever (Devin
+			// Review #47).
+			if _, err := loadCAPool(cfg.CACertPath); err != nil {
+				return nil, err
 			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caPEM) {
-				return nil, fmt.Errorf("append dataplane CA: failed to parse PEM")
+			if !cfg.Insecure {
+				serverName := u.Hostname()
+				tlsConfig.InsecureSkipVerify = true //nolint:gosec // chain is verified manually in VerifyPeerCertificate
+				tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+					if len(rawCerts) == 0 {
+						return errors.New("dataplane server presented no certificates")
+					}
+					roots, err := loadCAPool(cfg.CACertPath)
+					if err != nil {
+						return err
+					}
+					leaf, err := x509.ParseCertificate(rawCerts[0])
+					if err != nil {
+						return fmt.Errorf("parse dataplane server cert: %w", err)
+					}
+					intermediates := x509.NewCertPool()
+					for _, der := range rawCerts[1:] {
+						cert, err := x509.ParseCertificate(der)
+						if err != nil {
+							return fmt.Errorf("parse dataplane chain cert: %w", err)
+						}
+						intermediates.AddCert(cert)
+					}
+					_, err = leaf.Verify(x509.VerifyOptions{
+						DNSName:       serverName,
+						Roots:         roots,
+						Intermediates: intermediates,
+					})
+					return err
+				}
 			}
-			tlsConfig.RootCAs = caPool
 		}
 
 		if cfg.ClientCertPath != "" || cfg.ClientKeyPath != "" {
@@ -277,6 +308,20 @@ func (c *Client) createSSLCertificate(ctx context.Context, name string, pemBytes
 
 // leafSerial returns the decimal serial number of the first CERTIFICATE
 // block in pemBytes — the same value the storage GET reports as `serial`.
+// loadCAPool parses a PEM file into a CertPool — called per handshake so a
+// re-projected server-CA file takes effect without a pod restart.
+func loadCAPool(path string) (*x509.CertPool, error) {
+	caPEM, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read dataplane CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("append dataplane CA: failed to parse PEM")
+	}
+	return pool, nil
+}
+
 func leafSerial(pemBytes []byte) (string, error) {
 	for rest := pemBytes; ; {
 		block, next := pem.Decode(rest)
