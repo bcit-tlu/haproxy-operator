@@ -54,6 +54,26 @@ var (
 			Help: "Unix timestamp of the last successful configuration apply.",
 		},
 	)
+
+	// DataplaneServerCertExpiry is the NotAfter of the Dataplane API server
+	// leaf observed on the latest TLS handshake, by gateway hostname.
+	DataplaneServerCertExpiry = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "haproxy_operator_dataplane_server_cert_expiry_timestamp_seconds",
+			Help: "Unix expiry timestamp of the Dataplane API server certificate last seen on the mTLS handshake.",
+		},
+		[]string{"gateway"},
+	)
+
+	// DataplaneClientCertExpiry is the NotAfter of the operator's Dataplane
+	// client leaf parsed from the mounted certificate file (VSO rotates the
+	// file in place).
+	DataplaneClientCertExpiry = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "haproxy_operator_dataplane_client_cert_expiry_timestamp_seconds",
+			Help: "Unix expiry timestamp of the operator's Dataplane API client certificate file.",
+		},
+	)
 )
 
 func init() {
@@ -63,5 +83,7 @@ func init() {
 		TransientErrors,
 		ConfigHash,
 		LastSuccessfulApply,
+		DataplaneServerCertExpiry,
+		DataplaneClientCertExpiry,
 	)
 }

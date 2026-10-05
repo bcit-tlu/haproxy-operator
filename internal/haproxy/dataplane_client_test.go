@@ -14,11 +14,17 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bcit-tlu/haproxy-operator/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestNewClient(t *testing.T) {
@@ -239,6 +245,115 @@ func TestNewAPIErrorSurfacesBodyReadError(t *testing.T) {
 	e := newAPIError(&http.Response{StatusCode: 500, Body: failingBody{}})
 	if !strings.Contains(e.Message, "boom") {
 		t.Errorf("expected read error in message, got %q", e.Message)
+	}
+}
+
+// The server-cert expiry gauge must equal the NotAfter of the leaf the fake
+// TLS server presents on the handshake (bcit-tlu/haproxy-operator#41).
+func TestServerCertExpiryGauge(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, "1")
+	}))
+	defer srv.Close()
+
+	old := ServerCertObserver
+	ServerCertObserver = metrics.ObserveDataplaneServerCert
+	defer func() { ServerCertObserver = old }()
+
+	c, err := NewClient(APIConfig{BaseURL: srv.URL, Insecure: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+
+	gateway := srv.Listener.Addr().(*net.TCPAddr).IP.String()
+	want := float64(srv.Certificate().NotAfter.Unix())
+	if got := testutil.ToFloat64(metrics.DataplaneServerCertExpiry.WithLabelValues(gateway)); got != want {
+		t.Errorf("server cert gauge = %v, want %v", got, want)
+	}
+}
+
+// writeTestCertKeyPair generates a self-signed cert+key under dir and returns
+// (certPath, keyPath, serial) — used for client-cert rotation tests.
+func writeTestCertKeyPair(t *testing.T, dir string, serial int64) (string, string, *big.Int) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialNo := big.NewInt(serial)
+	tmpl := &x509.Certificate{
+		SerialNumber:          serialNo,
+		Subject:               pkix.Name{CommonName: "client.test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath, serialNo
+}
+
+// The client must re-read the mounted cert pair per handshake so a VSO
+// in-place rotation is picked up by the cached client (Devin Review #45).
+func TestClientCertReloadedOnHandshake(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath, serial1 := writeTestCertKeyPair(t, dir, 1)
+
+	c, err := NewClient(APIConfig{
+		BaseURL:        "https://haproxy:5555/v3",
+		Insecure:       true,
+		ClientCertPath: certPath,
+		ClientKeyPath:  keyPath,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	getCert := c.httpClient.Transport.(*http.Transport).TLSClientConfig.GetClientCertificate
+	if getCert == nil {
+		t.Fatal("expected GetClientCertificate to be set")
+	}
+
+	got, err := getCert(nil)
+	if err != nil {
+		t.Fatalf("first GetClientCertificate: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(got.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.SerialNumber.Cmp(serial1) != 0 {
+		t.Fatalf("first cert serial = %v, want %v", leaf.SerialNumber, serial1)
+	}
+
+	_, _, serial2 := writeTestCertKeyPair(t, dir, 2)
+	got, err = getCert(nil)
+	if err != nil {
+		t.Fatalf("second GetClientCertificate: %v", err)
+	}
+	leaf, err = x509.ParseCertificate(got.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.SerialNumber.Cmp(serial2) != 0 {
+		t.Fatalf("rotated cert serial = %v, want %v", leaf.SerialNumber, serial2)
 	}
 }
 

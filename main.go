@@ -11,6 +11,7 @@ import (
 	"github.com/bcit-tlu/haproxy-operator/internal/controller"
 	"github.com/bcit-tlu/haproxy-operator/internal/haproxy"
 	"github.com/bcit-tlu/haproxy-operator/internal/local"
+	"github.com/bcit-tlu/haproxy-operator/internal/metrics"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -27,6 +28,11 @@ import (
 // defaultDataplaneURL is the in-cluster Dataplane API endpoint. Local mode
 // downgrades it to plain HTTP when the user has not overridden it.
 const defaultDataplaneURL = "https://haproxy:5555/v3"
+
+// clientCertCheckInterval is how often the mounted Dataplane client
+// certificate file is re-parsed for the expiry gauge (VSO rotates the file
+// in place).
+const clientCertCheckInterval = 5 * time.Minute
 
 var (
 	scheme   = runtime.NewScheme()
@@ -95,6 +101,10 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	// Feed the server-certificate expiry gauge from every Dataplane TLS
+	// response (works for both file-based and SPIRE transports).
+	haproxy.ServerCertObserver = metrics.ObserveDataplaneServerCert
 
 	if mode == "k8s" {
 		if watchNamespace == "" {
@@ -217,7 +227,11 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	ctx := ctrl.SetupSignalHandler()
+	if dataplaneClientCert != "" {
+		go metrics.StartClientCertWatcher(ctx, dataplaneClientCert, clientCertCheckInterval)
+	}
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
