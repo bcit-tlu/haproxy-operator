@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.6.0...v0.7.0) (2026-10-05)
+
+
+### Features
+
+* **chart:** decouple dataplane server trust from client-cert Secret ([#47](https://github.com/bcit-tlu/haproxy-operator/issues/47)) ([ed2c1ac](https://github.com/bcit-tlu/haproxy-operator/commit/ed2c1ac9f016f200ec500b7bf3cdc005ec05e9be))
+
 ## [0.6.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.5.3...v0.6.0) (2026-10-05)
 
 
