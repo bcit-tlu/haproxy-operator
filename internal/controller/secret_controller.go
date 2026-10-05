@@ -51,9 +51,11 @@ const (
 	// LastAppliedTimeAnnotation records the last successful apply time.
 	LastAppliedTimeAnnotation = "haproxy.operator/last-applied-time"
 
-	// LastSyncedCertHashAnnotation records the SHA256 of the PEM bundle last
-	// pushed to Dataplane ssl_certificates storage for a managed cert Secret.
-	LastSyncedCertHashAnnotation = "haproxy.operator/last-synced-cert-hash"
+	// CertSyncAnnotation holds per-managed-cert sync state on the config
+	// Secret as JSON: {"<secretName>":{"hash":"<sha256>","time":"<RFC3339>"}}.
+	// TLS Secrets are VSO-owned — the operator never annotates them
+	// (bcit-tlu/haproxy-operator#43).
+	CertSyncAnnotation = "haproxy.operator/cert-sync"
 
 	// RequeueInterval is the default periodic reconciliation interval.
 	RequeueInterval = 5 * time.Minute
@@ -146,9 +148,15 @@ type SecretReconciler struct {
 	// stale series are deleted instead of accumulating.
 	lastMetricHash  string
 	lastMetricState string
+	// certSyncHashes mirrors CertSyncAnnotation in memory so a missing or
+	// unpatchable config Secret can't force a re-push (and an HAProxy
+	// reload) every reconcile.
+	certSyncHashes map[string]string
 }
 
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// Write access is confined to the config Secret — the chart scopes
+// update/patch via resourceNames; TLS Secrets stay read-only (#43).
 // +kubebuilder:rbac:groups=core,resources=secrets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
@@ -174,15 +182,28 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// A managed TLS Secret event: push the bundle to Dataplane storage, then
 	// continue into the config reconcile — a pending haproxy.cfg may be
-	// waiting on this crt file to exist before it can validate.
+	// waiting on this crt file to exist before it can validate. Sync state
+	// is recorded on the config Secret, never on the VSO-owned TLS Secret.
 	if isCert {
-		if err := r.syncCertSecret(ctx, secret); err != nil {
+		cfgSecret := secret
+		if r.SecretName != "" && secret.Name != r.SecretName {
+			cfgSecret = &corev1.Secret{}
+			if err := r.Get(ctx, client.ObjectKey{Namespace: req.Namespace, Name: r.SecretName}, cfgSecret); err != nil {
+				if !errors.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+				cfgSecret = nil
+			}
+		}
+		if err := r.syncCertSecret(ctx, secret, cfgSecret); err != nil {
 			class := haproxy.Classify(err)
 			log.Error(err, "certificate sync failed", "class", string(class))
 			metrics.TransientErrors.WithLabelValues(string(class)).Inc()
 			status.EmitEvent(r.Recorder, secret, status.CertSyncFailed, err.Error())
-			if uerr := r.failWithStatus(ctx, secret, "CertSync"+class.StatusValue(), err.Error()); uerr != nil {
-				return ctrl.Result{}, uerr
+			if cfgSecret != nil {
+				if uerr := r.failWithStatus(ctx, cfgSecret, "CertSync"+class.StatusValue(), err.Error()); uerr != nil {
+					return ctrl.Result{}, uerr
+				}
 			}
 			r.transientFailures++
 			return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
@@ -190,14 +211,11 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if r.SecretName == "" {
 			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 		}
-		req = ctrl.Request{NamespacedName: client.ObjectKey{Namespace: req.Namespace, Name: r.SecretName}}
-		secret = &corev1.Secret{}
-		if err := r.Get(ctx, req.NamespacedName, secret); err != nil {
-			if errors.IsNotFound(err) {
-				return ctrl.Result{RequeueAfter: RequeueInterval}, nil
-			}
-			return ctrl.Result{}, err
+		if cfgSecret == nil {
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 		}
+		req = ctrl.Request{NamespacedName: client.ObjectKey{Namespace: req.Namespace, Name: r.SecretName}}
+		secret = cfgSecret
 		// The cert payload changed the validation context: a cfg previously
 		// rejected for a missing crt file may now pass. Clear the in-memory
 		// suppression (the outcome re-marks it if it still fails).
@@ -262,7 +280,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// never suppress the desired config hash.
 	if len(r.CertsSecretNames) > 0 {
 		metrics.ReconcileAttempts.WithLabelValues("cert-sync").Inc()
-		if err := r.ensureCertSecretsSynced(ctx, secret.Namespace, haproxyClient); err != nil {
+		if err := r.ensureCertSecretsSynced(ctx, secret.Namespace, secret, haproxyClient); err != nil {
 			class := haproxy.Classify(err)
 			log.Error(err, "certificate sync failed", "class", string(class))
 			metrics.TransientErrors.WithLabelValues(string(class)).Inc()
