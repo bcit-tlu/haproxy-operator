@@ -1,0 +1,29 @@
+version: 2
+
+# Weekly grouped bumps keep release-please fed with one PR per ecosystem
+# instead of a stream of per-dependency noise. Major bumps stay ungrouped so
+# each gets its own review (they are the ones that break APIs).
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-patch:
+        update-types: [minor, patch]
