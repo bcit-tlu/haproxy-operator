@@ -14,11 +14,15 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bcit-tlu/haproxy-operator/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestNewClient(t *testing.T) {
@@ -239,6 +243,34 @@ func TestNewAPIErrorSurfacesBodyReadError(t *testing.T) {
 	e := newAPIError(&http.Response{StatusCode: 500, Body: failingBody{}})
 	if !strings.Contains(e.Message, "boom") {
 		t.Errorf("expected read error in message, got %q", e.Message)
+	}
+}
+
+// The server-cert expiry gauge must equal the NotAfter of the leaf the fake
+// TLS server presents on the handshake (bcit-tlu/haproxy-operator#41).
+func TestServerCertExpiryGauge(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, "1")
+	}))
+	defer srv.Close()
+
+	old := ServerCertObserver
+	ServerCertObserver = metrics.ObserveDataplaneServerCert
+	defer func() { ServerCertObserver = old }()
+
+	c, err := NewClient(APIConfig{BaseURL: srv.URL, Insecure: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+
+	gateway := srv.Listener.Addr().(*net.TCPAddr).IP.String()
+	want := float64(srv.Certificate().NotAfter.Unix())
+	if got := testutil.ToFloat64(metrics.DataplaneServerCertExpiry.WithLabelValues(gateway)); got != want {
+		t.Errorf("server cert gauge = %v, want %v", got, want)
 	}
 }
 

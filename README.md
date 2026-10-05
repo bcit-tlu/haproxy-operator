@@ -79,6 +79,15 @@ curl http://localhost:8404    # HAProxy stats
 
 See `charts/haproxy-operator/values.yaml` for the full set of Helm values.
 
+## Metrics
+
+Prometheus metrics are served on `--metrics-bind-address` (default `:9090`). In addition to the reconcile counters/gauges (`haproxy_operator_reconcile_*`, `haproxy_operator_config_hash`, `haproxy_operator_last_successful_apply_timestamp_seconds`), the operator exports both ends of the Dataplane mTLS session's certificate expiry:
+
+| Metric | Labels | Source |
+|---|---|---|
+| `haproxy_operator_dataplane_server_cert_expiry_timestamp_seconds` | `gateway` (Dataplane hostname) | `NotAfter` of the server leaf presented on the latest TLS handshake — tracks the gateway's vault-agent-renewed leaf |
+| `haproxy_operator_dataplane_client_cert_expiry_timestamp_seconds` | — | `NotAfter` of the mounted client certificate file, re-parsed every 5m — tracks VSO `VaultPKISecret` rotation |
+
 ## Security
 
 ### SPIFFE/SPIRE

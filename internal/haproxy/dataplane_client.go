@@ -28,6 +28,13 @@ const (
 	readyPollInterval = 250 * time.Millisecond
 )
 
+// ServerCertObserver, when non-nil, is invoked with the gateway hostname and
+// the presented leaf's NotAfter after every TLS response — used to export
+// server-certificate expiry without coupling this package to a metrics
+// registry. Any completed response updates it; a failed handshake simply
+// leaves the last observed value.
+var ServerCertObserver func(gateway string, notAfter time.Time)
+
 // APIConfig holds HAProxy Dataplane API connection details.
 type APIConfig struct {
 	BaseURL        string // e.g. https://haproxy:5555/v3
@@ -349,6 +356,10 @@ func (c *Client) do(ctx context.Context, method, p string, body io.Reader, conte
 		return err
 	}
 	defer resp.Body.Close()
+
+	if ServerCertObserver != nil && resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
+		ServerCertObserver(c.baseURL.Hostname(), resp.TLS.PeerCertificates[0].NotAfter)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return newAPIError(resp)
