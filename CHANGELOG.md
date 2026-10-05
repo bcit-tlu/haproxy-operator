@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.5.3...v0.6.0) (2026-10-05)
+
+
+### Features
+
+* **metrics:** export Dataplane server and client certificate expiry gauges ([#45](https://github.com/bcit-tlu/haproxy-operator/issues/45)) ([d230efd](https://github.com/bcit-tlu/haproxy-operator/commit/d230efdbcaa0c1dcca3cc935e96eaef9f8c4bbb0))
+
 ## [0.5.3](https://github.com/bcit-tlu/haproxy-operator/compare/v0.5.2...v0.5.3) (2026-10-03)
 
 
