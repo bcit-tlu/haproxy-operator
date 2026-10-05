@@ -7,6 +7,12 @@
 {{- if and (not .Values.spire.enabled) (not .Values.vault.enabled) (not .Values.dataplane.tls.existingSecret) }}
 {{- fail "dataplane.tls.existingSecret is required when neither vault.enabled nor spire.enabled is set" }}
 {{- end }}
+{{- /* Resolve the server-CA source early — helper fails on >1 source or
+     vaultPKI without vault.enabled. Ignored entirely under SPIRE. */}}
+{{- $serverCAKind := "" }}
+{{- if not .Values.spire.enabled }}
+{{- $serverCAKind = include "haproxy-operator.serverCAKind" . }}
+{{- end }}
 {{- /* Effective Basic Auth Secret: explicit dataplane.auth.secretName wins;
      otherwise fall back to the VSO-synced Secret when vault.static is on. */}}
 {{- $authSecret := .Values.dataplane.auth.secretName | default (ternary .Values.vault.static.secretName "" (and .Values.vault.enabled .Values.vault.static.enabled)) }}
@@ -109,6 +115,9 @@ spec:
             - name: tls
               mountPath: /etc/haproxy-operator/tls
               readOnly: true
+            - name: server-ca
+              mountPath: /etc/haproxy-operator/server-ca
+              readOnly: true
             {{- end }}
             {{- if .Values.spire.enabled }}
             - name: spire-agent-socket
@@ -120,6 +129,22 @@ spec:
         - name: tls
           secret:
             secretName: {{ ternary .Values.vault.pki.secretName .Values.dataplane.tls.existingSecret .Values.vault.enabled }}
+        # Server trust anchor — separate volume so the client-cert Secret and
+        # the server CA may come from different issuers (bcit-tlu/vault#69).
+        - name: server-ca
+          {{- if eq $serverCAKind "configMap" }}
+          configMap:
+            name: {{ .Values.dataplane.serverCA.configMap.name }}
+            items:
+              - key: {{ include "haproxy-operator.serverCAKey" . }}
+                path: ca.crt
+          {{- else }}
+          secret:
+            secretName: {{ include "haproxy-operator.serverCASecretName" . }}
+            items:
+              - key: {{ include "haproxy-operator.serverCAKey" . }}
+                path: ca.crt
+          {{- end }}
         {{- end }}
         {{- if .Values.spire.enabled }}
         - name: spire-agent-socket

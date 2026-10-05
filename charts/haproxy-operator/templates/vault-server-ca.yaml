@@ -1,0 +1,34 @@
+{{- if and .Values.vault.enabled (not .Values.spire.enabled) (eq (include "haproxy-operator.serverCAKind" .) "vaultPKI") }}
+# VSO VaultDynamicSecret — syncs the Dataplane SERVER trust anchor from
+# <mount>/cert/ca (the issuing intermediate PEM, a plain GET with no lease)
+# into the Secret the deployment mounts as the server-ca volume. This is a
+# different object than the client-cert VaultPKISecret: server trust is
+# independent of the operator's client identity so a dedicated client CA
+# (bcit-tlu/vault#69) can land without breaking gateway verification.
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultDynamicSecret
+metadata:
+  name: {{ include "haproxy-operator.fullname" . }}-server-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "haproxy-operator.labels" . | nindent 4 }}
+spec:
+  vaultAuthRef: {{ .Values.vault.authRef }}
+  mount: {{ .Values.dataplane.serverCA.vaultPKI.mount | default .Values.vault.pki.mount }}
+  path: {{ .Values.dataplane.serverCA.vaultPKI.path }}
+  # cert/ca is a GET endpoint returning no lease — VSO needs allowStaticCreds
+  # to sync it, refreshed on the configured interval.
+  requestHTTPMethod: GET
+  allowStaticCreds: true
+  refreshAfter: {{ .Values.dataplane.serverCA.vaultPKI.refreshAfter }}
+  destination:
+    name: {{ include "haproxy-operator.serverCASecretName" . }}
+    create: true
+    transformation:
+      templates:
+        ca.crt:
+          text: {{ `{{- get .Secrets "certificate" -}}` | quote }}
+  rolloutRestartTargets:
+    - kind: Deployment
+      name: {{ include "haproxy-operator.fullname" . }}
+{{- end }}
