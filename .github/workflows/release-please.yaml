@@ -44,7 +44,7 @@ jobs:
       # blocked. On any subsequent push where the state is still stale
       # and there's nothing to release, the workflow fails loudly to
       # force the cleanup PR.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: steps.rp.outputs.releases_created != 'true'
       - name: Guard against stale `release-as` entries
         if: steps.rp.outputs.releases_created != 'true'
