@@ -94,6 +94,15 @@ var (
 		},
 		[]string{"secret"},
 	)
+
+	// DataplaneInsecure is 1 while --dataplane-insecure is set, so a mode
+	// that disables TLS verification stays alertable even outside Helm.
+	DataplaneInsecure = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "haproxy_operator_dataplane_insecure",
+			Help: "1 when the operator runs with --dataplane-insecure (server verification disabled).",
+		},
+	)
 )
 
 func init() {
@@ -107,5 +116,6 @@ func init() {
 		DataplaneClientCertExpiry,
 		ConfigDrift,
 		ConfigInSync,
+		DataplaneInsecure,
 	)
 }
