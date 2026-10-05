@@ -221,6 +221,17 @@ func (c *Client) applyRaw(ctx context.Context, raw string) error {
 	return c.doRequestPlain(ctx, http.MethodPost, endpoint, raw, nil)
 }
 
+// GetRawConfiguration returns the live haproxy.cfg exactly as the gateway
+// reports it. Dataplane may normalize content on write, so this — not the
+// submitted bytes — is the reference for drift detection.
+func (c *Client) GetRawConfiguration(ctx context.Context) (string, error) {
+	var raw string
+	if err := c.doRequestPlain(ctx, http.MethodGet, "/services/haproxy/configuration/raw", "", &raw); err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
 // ValidateRawConfiguration validates raw haproxy.cfg via the Dataplane API
 // only_validate endpoint without applying it.
 func (c *Client) ValidateRawConfiguration(ctx context.Context, raw string) error {
@@ -426,6 +437,16 @@ func (c *Client) do(ctx context.Context, method, p string, body io.Reader, conte
 	}
 
 	if result != nil && resp.StatusCode != http.StatusNoContent {
+		// A *string result asks for the raw response body (e.g. the
+		// text/plain haproxy.cfg returned by GET configuration/raw).
+		if s, ok := result.(*string); ok {
+			b, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return err
+			}
+			*s = string(b)
+			return nil
+		}
 		return json.NewDecoder(resp.Body).Decode(result)
 	}
 	return nil

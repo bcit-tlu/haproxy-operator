@@ -3,12 +3,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,6 +22,7 @@ import (
 
 	"github.com/bcit-tlu/haproxy-operator/internal/config"
 	"github.com/bcit-tlu/haproxy-operator/internal/haproxy"
+	"github.com/bcit-tlu/haproxy-operator/internal/metrics"
 	"github.com/bcit-tlu/haproxy-operator/internal/status"
 )
 
@@ -111,6 +114,9 @@ type fakeDataplane struct {
 	applyCode     int
 	validateCalls int
 	applyCalls    int
+	// liveConfig is what GET /configuration/raw serves — a successful apply
+	// overwrites it, mimicking Dataplane storing the pushed config.
+	liveConfig string
 }
 
 func newFakeDataplane(t *testing.T, validateCode, applyCode int) *fakeDataplane {
@@ -121,6 +127,9 @@ func newFakeDataplane(t *testing.T, validateCode, applyCode int) *fakeDataplane 
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/configuration/version"):
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, "1")
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/configuration/raw"):
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, fd.liveConfig)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/configuration/raw"):
 			if r.URL.Query().Get("only_validate") == "true" {
 				fd.validateCalls++
@@ -131,6 +140,8 @@ func newFakeDataplane(t *testing.T, validateCode, applyCode int) *fakeDataplane 
 				return
 			}
 			fd.applyCalls++
+			b, _ := io.ReadAll(r.Body)
+			fd.liveConfig = string(b)
 			w.WriteHeader(fd.applyCode)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -287,5 +298,141 @@ func TestReconcileSuccessClearsStaleFailureState(t *testing.T) {
 	}
 	if fd.applyCalls != 1 {
 		t.Errorf("expected 1 apply call, got %d", fd.applyCalls)
+	}
+}
+
+func secretWithHashAnnotations(secret *corev1.Secret, observed string) *corev1.Secret {
+	h := config.HashBytes(secret.Data["haproxy.cfg"])
+	if secret.Annotations == nil {
+		secret.Annotations = map[string]string{}
+	}
+	secret.Annotations[LastAppliedHashAnnotation] = h
+	if observed != "" {
+		secret.Annotations[LastObservedHashAnnotation] = config.HashBytes([]byte(observed))
+	}
+	return secret
+}
+
+func drainEvents(r *SecretReconciler) []string {
+	var out []string
+	fr := r.Recorder.(*record.FakeRecorder)
+	for {
+		select {
+		case e := <-fr.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+func TestReconcileNoDriftSkipsApply(t *testing.T) {
+	fd := newFakeDataplane(t, http.StatusOK, http.StatusAccepted)
+	// Dataplane normalized the applied submission; last-observed-hash pins it.
+	fd.liveConfig = "global\n    maxconn 1024\n\n"
+	r, _ := newTestReconciler(t, fd.server.URL+"/v3",
+		secretWithHashAnnotations(configSecret(nil), fd.liveConfig))
+
+	res := reconcileOnce(t, r)
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("expected RequeueInterval, got %v", res.RequeueAfter)
+	}
+	if fd.validateCalls != 0 || fd.applyCalls != 0 {
+		t.Errorf("in-sync live config must not validate/apply (validate=%d apply=%d)", fd.validateCalls, fd.applyCalls)
+	}
+	if got := testutil.ToFloat64(metrics.ConfigInSync.WithLabelValues("haproxy-config")); got != 1 {
+		t.Errorf("config_in_sync = %v, want 1", got)
+	}
+}
+
+func TestReconcileDriftRemediates(t *testing.T) {
+	fd := newFakeDataplane(t, http.StatusOK, http.StatusAccepted)
+	fd.liveConfig = "global\n    maxconn 512\n" // out-of-band change
+	s := secretWithHashAnnotations(configSecret(nil), "global\n    maxconn 1024\n")
+	r, c := newTestReconciler(t, fd.server.URL+"/v3", s)
+	r.DriftRemediate = true
+
+	res := reconcileOnce(t, r)
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("expected RequeueInterval after remediation, got %v", res.RequeueAfter)
+	}
+	if fd.applyCalls != 1 {
+		t.Errorf("drifted live config must trigger an apply, apply=%d", fd.applyCalls)
+	}
+	if got := testutil.ToFloat64(metrics.ConfigDrift.WithLabelValues("haproxy-config")); got != 1 {
+		t.Errorf("config_drift_total = %v, want 1", got)
+	}
+	// Apply succeeded → the observed hash now pins the stored (applied) bytes.
+	out := getSecret(t, c)
+	want := config.HashBytes(out.Data["haproxy.cfg"])
+	if got := out.Annotations[LastObservedHashAnnotation]; got != want {
+		t.Errorf("last-observed-hash = %q, want %q", got, want)
+	}
+	var driftEvent bool
+	for _, e := range drainEvents(r) {
+		if strings.Contains(e, "ConfigDrift") {
+			driftEvent = true
+		}
+	}
+	if !driftEvent {
+		t.Error("expected a ConfigDrift event")
+	}
+	if got := testutil.ToFloat64(metrics.ConfigInSync.WithLabelValues("haproxy-config")); got != 1 {
+		t.Errorf("config_in_sync = %v after remediation, want 1", got)
+	}
+}
+
+func TestReconcileDriftSuppressedWhenDesiredRejected(t *testing.T) {
+	fd := newFakeDataplane(t, http.StatusOK, http.StatusAccepted)
+	fd.liveConfig = "global\n    maxconn 512\n"
+	s := secretWithHashAnnotations(configSecret(nil), "global\n    maxconn 1024\n")
+	s.Annotations[LastFailedHashAnnotation] = s.Annotations[LastAppliedHashAnnotation]
+	r, _ := newTestReconciler(t, fd.server.URL+"/v3", s)
+	r.DriftRemediate = true
+
+	res := reconcileOnce(t, r)
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("expected RequeueInterval, got %v", res.RequeueAfter)
+	}
+	if fd.applyCalls != 0 {
+		t.Errorf("suppressed desired config must not re-apply, apply=%d", fd.applyCalls)
+	}
+	var found bool
+	for _, e := range drainEvents(r) {
+		if strings.Contains(e, "ConfigDrift") && strings.Contains(e, "suppressed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a ConfigDrift event explaining the suppression")
+	}
+}
+
+func TestReconcileDriftAlertOnlyWhenRemediateDisabled(t *testing.T) {
+	fd := newFakeDataplane(t, http.StatusOK, http.StatusAccepted)
+	fd.liveConfig = "global\n    maxconn 512\n"
+	s := secretWithHashAnnotations(configSecret(nil), "global\n    maxconn 1024\n")
+	r, _ := newTestReconciler(t, fd.server.URL+"/v3", s)
+	// DriftRemediate false: detect + report, never apply.
+	r.DriftRemediate = false
+
+	res := reconcileOnce(t, r)
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("expected RequeueInterval, got %v", res.RequeueAfter)
+	}
+	if fd.applyCalls != 0 {
+		t.Errorf("drift-remediate=false must not apply, apply=%d", fd.applyCalls)
+	}
+	if got := testutil.ToFloat64(metrics.ConfigInSync.WithLabelValues("haproxy-config")); got != 0 {
+		t.Errorf("config_in_sync = %v, want 0 after drift", got)
+	}
+	var found bool
+	for _, e := range drainEvents(r) {
+		if strings.Contains(e, "ConfigDrift") && strings.Contains(e, "disabled") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a ConfigDrift event noting remediation is disabled")
 	}
 }

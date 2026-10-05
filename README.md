@@ -41,6 +41,7 @@ Designed for a GitOps workflow where infrastructure operators commit `haproxy.cf
 - **Credential-aware readiness**: `/readyz` proves the mounted credentials and an authenticated Dataplane read; `/healthz` stays process-local
 - **Environment promotion**: `latest` (dev) → `stable` (production) using Flux Kustomize overlays
 - **Kubernetes Events**: Accept/reject status emitted as Events on the config Secret for observability
+- **Live drift detection**: Every periodic requeue re-reads the gateway's raw config and compares it against the config observed right after the last apply — out-of-band changes (manual `dataplaneapi` writes, backup restores, re-imaged gateways) emit a `ConfigDrift` Warning Event, bump `haproxy_operator_config_drift_total`, drop `haproxy_operator_config_in_sync{secret}` to 0, and re-apply the desired config (`--drift-remediate=false` switches to alert-only)
 - **Leader election**: Safe multi-replica deployment with controller-runtime leader election
 
 ## Modes
@@ -73,6 +74,7 @@ curl http://localhost:8404    # HAProxy stats
 | `--secret-name` / `SECRET_NAME` | `haproxy-config` | Secret containing haproxy.cfg |
 | `--secret-key` / `SECRET_KEY` | `haproxy.cfg` | Key within the Secret |
 | `--certs-secret-names` / `CERTS_SECRET_NAMES` | — | Comma-separated TLS Secrets pushed to Dataplane `ssl_certificates` storage as `<name>.pem` before config validation |
+| `--drift-remediate` / `DRIFT_REMEDIATE` | `true` | Re-apply the desired config when the live gateway config drifts; `false` = detect + alert only |
 | `--dataplane-url` / `DATAPLANE_URL` | `https://haproxy:5555/v3` | Dataplane API base URL |
 | `--spire-socket` / `SPIRE_AGENT_SOCKET` | — | SPIRE Workload API socket |
 | `--leader-elect` / `LEADER_ELECT` | `false` | Enable leader election |
@@ -87,6 +89,8 @@ Prometheus metrics are served on `--metrics-bind-address` (default `:9090`). In 
 |---|---|---|
 | `haproxy_operator_dataplane_server_cert_expiry_timestamp_seconds` | `gateway` (Dataplane hostname) | `NotAfter` of the server leaf presented on the latest TLS handshake — tracks the gateway's vault-agent-renewed leaf |
 | `haproxy_operator_dataplane_client_cert_expiry_timestamp_seconds` | — | `NotAfter` of the mounted client certificate file, re-parsed every 5m — tracks VSO `VaultPKISecret` rotation |
+| `haproxy_operator_config_drift_total` | `secret` | Cumulative drift detections — the live gateway config diverged from the last-observed applied config |
+| `haproxy_operator_config_in_sync` | `secret` | `1` while the live config matches the last-observed applied config; `0` after drift is detected |
 
 ## Security
 

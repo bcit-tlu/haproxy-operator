@@ -74,6 +74,26 @@ var (
 			Help: "Unix expiry timestamp of the operator's Dataplane API client certificate file.",
 		},
 	)
+
+	// ConfigDrift counts periodic-requeue checks that found the gateway's
+	// live raw config diverged from the last-observed applied config.
+	ConfigDrift = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "haproxy_operator_config_drift_total",
+			Help: "Total drift detections: live gateway config differed from the last-observed applied config.",
+		},
+		[]string{"secret"},
+	)
+
+	// ConfigInSync is 1 while the live gateway config matches the
+	// last-observed applied config, 0 after drift is detected.
+	ConfigInSync = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "haproxy_operator_config_in_sync",
+			Help: "Whether the gateway's live config matches the last-observed applied config (1) or has drifted (0).",
+		},
+		[]string{"secret"},
+	)
 )
 
 func init() {
@@ -85,5 +105,7 @@ func init() {
 		LastSuccessfulApply,
 		DataplaneServerCertExpiry,
 		DataplaneClientCertExpiry,
+		ConfigDrift,
+		ConfigInSync,
 	)
 }
