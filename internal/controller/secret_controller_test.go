@@ -117,6 +117,9 @@ type fakeDataplane struct {
 	// liveConfig is what GET /configuration/raw serves — a successful apply
 	// overwrites it, mimicking Dataplane storing the pushed config.
 	liveConfig string
+	// getRawFails makes GET /configuration/raw return 503, simulating a
+	// gateway that accepts writes but refuses the drift-check read.
+	getRawFails bool
 }
 
 func newFakeDataplane(t *testing.T, validateCode, applyCode int) *fakeDataplane {
@@ -128,6 +131,10 @@ func newFakeDataplane(t *testing.T, validateCode, applyCode int) *fakeDataplane 
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, "1")
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/configuration/raw"):
+			if fd.getRawFails {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			w.Header().Set("Content-Type", "text/plain")
 			fmt.Fprint(w, fd.liveConfig)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/configuration/raw"):
@@ -434,5 +441,101 @@ func TestReconcileDriftAlertOnlyWhenRemediateDisabled(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected a ConfigDrift event noting remediation is disabled")
+	}
+}
+
+// A failed post-apply read-back records observedHashPending; the next
+// successful live read adopts the live bytes as the verified baseline
+// rather than re-applying on a normalization mismatch.
+func TestReconcilePendingBaselineAdopted(t *testing.T) {
+	fd := newFakeDataplane(t, http.StatusOK, http.StatusAccepted)
+	// Dataplane normalized the applied config (extra trailing newline).
+	fd.liveConfig = "global\n    maxconn 1024\n\n"
+	s := secretWithHashAnnotations(configSecret(nil), "")
+	s.Annotations[LastObservedHashAnnotation] = observedHashPending
+	r, c := newTestReconciler(t, fd.server.URL+"/v3", s)
+
+	res := reconcileOnce(t, r)
+	if res.RequeueAfter != RequeueInterval {
+		t.Errorf("expected RequeueInterval, got %v", res.RequeueAfter)
+	}
+	if fd.applyCalls != 0 {
+		t.Errorf("pending baseline must adopt live bytes, not re-apply (apply=%d)", fd.applyCalls)
+	}
+	out := getSecret(t, c)
+	if got := out.Annotations[LastObservedHashAnnotation]; got != config.HashBytes([]byte(fd.liveConfig)) {
+		t.Errorf("last-observed-hash = %q, want live hash %q", got, config.HashBytes([]byte(fd.liveConfig)))
+	}
+}
+
+// Failed read-back after a successful apply leaves the baseline pending —
+// subsequent reconciles must not mistake normalized stored bytes for drift.
+func TestReconcileFailedReadBackDoesNotRemediateLoop(t *testing.T) {
+	fd := newFakeDataplane(t, http.StatusOK, http.StatusAccepted)
+	r, c := newTestReconciler(t, fd.server.URL+"/v3", configSecret(nil))
+	r.DriftRemediate = true
+
+	// First reconcile applies; make the read-back fail so no baseline is
+	// recorded.
+	fd.getRawFails = true
+	res := reconcileOnce(t, r)
+	if res.RequeueAfter != RequeueInterval {
+		t.Fatalf("apply failed: %v", res.RequeueAfter)
+	}
+	out := getSecret(t, c)
+	if got := out.Annotations[LastObservedHashAnnotation]; got != observedHashPending {
+		t.Fatalf("last-observed-hash = %q, want %q", got, observedHashPending)
+	}
+
+	// Dataplane normalized the stored bytes so they differ from the
+	// desired hash. The pending baseline must be adopted — no apply.
+	fd.getRawFails = false
+	fd.liveConfig += "\n"
+	applies := fd.applyCalls
+	reconcileOnce(t, r)
+	if fd.applyCalls != applies {
+		t.Error("pending baseline caused a false remediation apply")
+	}
+	out = getSecret(t, c)
+	if out.Annotations[LastObservedHashAnnotation] == observedHashPending {
+		t.Error("baseline stayed pending after a successful live read")
+	}
+}
+
+// A successful in-sync check clears a stale DriftCheck failure status.
+func TestReconcileInSyncClearsStaleDriftCheckStatus(t *testing.T) {
+	fd := newFakeDataplane(t, http.StatusOK, http.StatusAccepted)
+	fd.liveConfig = "global\n    maxconn 1024\n"
+	s := secretWithHashAnnotations(configSecret(nil), fd.liveConfig)
+	s.Annotations[StatusAnnotation] = "DriftCheckConnectionError"
+	s.Annotations[StatusMessageAnnotation] = "get raw config: connection refused"
+	r, c := newTestReconciler(t, fd.server.URL+"/v3", s)
+
+	reconcileOnce(t, r)
+	out := getSecret(t, c)
+	if got := out.Annotations[StatusAnnotation]; got != "Applied" {
+		t.Errorf("status = %q, want Applied after recovered drift check", got)
+	}
+	if _, ok := out.Annotations[StatusMessageAnnotation]; ok {
+		t.Error("stale status-message survived the recovered check")
+	}
+}
+
+// Repeated drift-check read failures must accumulate backoff, not poll at
+// baseRetryInterval forever.
+func TestReconcileDriftCheckFailuresBackoff(t *testing.T) {
+	fd := newFakeDataplane(t, http.StatusOK, http.StatusAccepted)
+	fd.getRawFails = true
+	fd.liveConfig = "global\n    maxconn 1024\n"
+	r, _ := newTestReconciler(t, fd.server.URL+"/v3",
+		secretWithHashAnnotations(configSecret(nil), fd.liveConfig))
+
+	first := reconcileOnce(t, r)
+	second := reconcileOnce(t, r)
+	if first.RequeueAfter != backoffForFailure(1) {
+		t.Errorf("first failure requeue = %v, want %v", first.RequeueAfter, backoffForFailure(1))
+	}
+	if second.RequeueAfter <= first.RequeueAfter {
+		t.Errorf("second failure requeue %v did not exceed first %v — backoff reset before the read", second.RequeueAfter, first.RequeueAfter)
 	}
 }

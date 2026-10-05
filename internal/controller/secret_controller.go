@@ -32,6 +32,12 @@ const (
 	// LastAppliedHashAnnotation stores the SHA256 of the last successfully applied config.
 	LastAppliedHashAnnotation = "haproxy.operator/last-applied-hash"
 
+	// observedHashPending marks LastObservedHashAnnotation when the
+	// post-apply read-back failed: no verified baseline exists yet, so the
+	// next successful live read establishes it rather than comparing
+	// against the unverified desired-bytes hash.
+	observedHashPending = "pending"
+
 	// LastObservedHashAnnotation stores the SHA256 of the raw config as read
 	// back from the gateway immediately after the last successful apply.
 	// Dataplane may normalize a submission, so drift detection compares the
@@ -236,8 +242,6 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	lastAppliedHash := secret.Annotations[LastAppliedHashAnnotation]
 
 	if currentHash == lastAppliedHash {
-		r.transientFailures = 0
-
 		// The desired bytes are unchanged — but the gateway's live config
 		// may have drifted out-of-band (manual dataplaneapi writes, a
 		// backup restore, a re-imaged gateway's bootstrap config). Compare
@@ -270,12 +274,46 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
 		}
 
+		// Successful live read — reset the transient-failure backoff (a
+		// failure resets it too, but only after counting up, so repeated
+		// check failures keep backing off rather than polling every
+		// baseRetryInterval).
+		r.transientFailures = 0
+		liveHash := config.HashBytes([]byte(liveRaw))
+
 		expectedHash := secret.Annotations[LastObservedHashAnnotation]
+		if expectedHash == observedHashPending {
+			// A prior apply's read-back failed before a baseline could be
+			// recorded. The just-read live bytes are the first verified
+			// observation since that apply — adopt them as the baseline
+			// rather than comparing against the unverified desired hash
+			// (Dataplane may normalize submissions, so live bytes can
+			// legitimately differ from what was posted).
+			if uerr := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
+				ann[LastObservedHashAnnotation] = liveHash
+				ann[StatusAnnotation] = "Applied"
+				delete(ann, StatusMessageAnnotation)
+			}); uerr != nil {
+				log.Error(uerr, "failed to record observed baseline")
+			}
+			metrics.ConfigInSync.WithLabelValues(secret.Name).Set(1)
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		}
 		if expectedHash == "" {
 			expectedHash = lastAppliedHash
 		}
-		if config.HashBytes([]byte(liveRaw)) == expectedHash {
+		if liveHash == expectedHash {
 			metrics.ConfigInSync.WithLabelValues(secret.Name).Set(1)
+			// A recovered check must not leave a stale DriftCheck failure
+			// status behind — clear it, preserving unrelated statuses.
+			if strings.HasPrefix(secret.Annotations[StatusAnnotation], "DriftCheck") {
+				if uerr := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
+					ann[StatusAnnotation] = "Applied"
+					delete(ann, StatusMessageAnnotation)
+				}); uerr != nil {
+					log.Error(uerr, "failed to clear stale drift-check status")
+				}
+			}
 			log.Info("configuration unchanged, live config in sync")
 			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
 		}
@@ -427,17 +465,14 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if liveRaw, rerr := haproxyClient.GetRawConfiguration(ctx); rerr == nil {
 		observedHash = config.HashBytes([]byte(liveRaw))
 	} else {
-		log.Info("applied config could not be read back; the next drift check falls back to the desired hash", "error", rerr)
+		log.Info("applied config could not be read back; marking baseline unverified until the next live read", "error", rerr)
+		observedHash = observedHashPending
 	}
 
 	// Phase 3: Record the applied hash and clear stale failure state.
 	if err := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
 		ann[LastAppliedHashAnnotation] = currentHash
-		if observedHash != "" {
-			ann[LastObservedHashAnnotation] = observedHash
-		} else {
-			delete(ann, LastObservedHashAnnotation)
-		}
+		ann[LastObservedHashAnnotation] = observedHash
 		ann[StatusAnnotation] = "Applied"
 		ann[LastAppliedTimeAnnotation] = time.Now().Format(time.RFC3339)
 		delete(ann, LastFailedHashAnnotation)
