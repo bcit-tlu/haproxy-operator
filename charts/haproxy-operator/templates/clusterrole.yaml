@@ -6,9 +6,16 @@ metadata:
   labels:
     {{- include "haproxy-operator.labels" . | nindent 4 }}
 rules:
+  # Read-only on Secrets cluster-wide — TLS Secrets are VSO-owned and must
+  # never be written (bcit-tlu/haproxy-operator#43).
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch"]
+  # Write (status/cert-sync annotations) is confined to the config Secret.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ .Values.secretName }}"]
+    verbs: ["get", "update", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]

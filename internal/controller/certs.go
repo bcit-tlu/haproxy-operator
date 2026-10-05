@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -16,15 +17,33 @@ import (
 	"github.com/bcit-tlu/haproxy-operator/internal/status"
 )
 
+// certSyncEntry is one managed cert's sync record inside CertSyncAnnotation.
+type certSyncEntry struct {
+	Hash string `json:"hash"`
+	Time string `json:"time"`
+}
+
+// certSyncState decodes the per-cert sync map off the config Secret
+// (nil-secret and malformed JSON both degrade to an empty map).
+func certSyncState(s *corev1.Secret) map[string]certSyncEntry {
+	out := map[string]certSyncEntry{}
+	if s == nil {
+		return out
+	}
+	_ = json.Unmarshal([]byte(s.Annotations[CertSyncAnnotation]), &out)
+	return out
+}
+
 // syncCertSecret pushes one managed TLS Secret to Dataplane ssl_certificates
-// storage and records the pushed bundle hash on the Secret. Errors are
-// classified and surfaced by the caller.
-func (r *SecretReconciler) syncCertSecret(ctx context.Context, secret *corev1.Secret) error {
+// storage. Sync bookkeeping lives on the config Secret (stateSecret) — the
+// TLS Secrets are VSO-owned and are never annotated (bcit-tlu/haproxy-operator#43).
+// Errors are classified and surfaced by the caller.
+func (r *SecretReconciler) syncCertSecret(ctx context.Context, secret, stateSecret *corev1.Secret) error {
 	haproxyClient, err := r.getOrCreateClient(ctx)
 	if err != nil {
 		return err
 	}
-	changed, err := r.pushCertSecret(ctx, haproxyClient, secret)
+	changed, err := r.pushCertSecret(ctx, haproxyClient, secret, stateSecret)
 	if err != nil {
 		return err
 	}
@@ -37,13 +56,13 @@ func (r *SecretReconciler) syncCertSecret(ctx context.Context, secret *corev1.Se
 // ensureCertSecretsSynced pushes every managed TLS Secret ahead of config
 // validation — the dataplane validation run parses `crt` paths against the
 // gateway filesystem, so referenced certs must already exist there.
-func (r *SecretReconciler) ensureCertSecretsSynced(ctx context.Context, namespace string, haproxyClient *haproxy.Client) error {
+func (r *SecretReconciler) ensureCertSecretsSynced(ctx context.Context, namespace string, stateSecret *corev1.Secret, haproxyClient *haproxy.Client) error {
 	for _, name := range r.CertsSecretNames {
 		s := &corev1.Secret{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, s); err != nil {
 			return fmt.Errorf("fetch cert secret %q: %w", name, err)
 		}
-		if _, err := r.pushCertSecret(ctx, haproxyClient, s); err != nil {
+		if _, err := r.pushCertSecret(ctx, haproxyClient, s, stateSecret); err != nil {
 			return fmt.Errorf("sync cert secret %q: %w", name, err)
 		}
 	}
@@ -56,25 +75,35 @@ func (r *SecretReconciler) ensureCertSecretsSynced(ctx context.Context, namespac
 // hash still equals the bundle being offered — either side's signal alone
 // can miss a change (same-length chain swaps fool remote metadata; a file
 // removed out-of-band fools the annotation).
-func (r *SecretReconciler) pushCertSecret(ctx context.Context, haproxyClient *haproxy.Client, secret *corev1.Secret) (bool, error) {
+func (r *SecretReconciler) pushCertSecret(ctx context.Context, haproxyClient *haproxy.Client, secret, stateSecret *corev1.Secret) (bool, error) {
 	pemBundle, err := certPEMBundle(secret)
 	if err != nil {
 		return false, err
 	}
 	storageName := secret.Name + ".pem"
 	hash := config.HashBytes(pemBundle)
-	previouslySynced := secret.Annotations[LastSyncedCertHashAnnotation] == hash
+	state := certSyncState(stateSecret)
+	// The in-memory map mirrors the annotation so an absent config Secret
+	// can't force a re-push (and an HAProxy reload) on every cycle.
+	previouslySynced := state[secret.Name].Hash == hash || r.certSyncHashes[secret.Name] == hash
 	changed, err := haproxyClient.SyncSSLCertificate(ctx, storageName, pemBundle, previouslySynced)
 	if err != nil {
 		return false, err
 	}
 
-	if changed || secret.Annotations[LastSyncedCertHashAnnotation] != hash {
-		if perr := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
-			ann[LastSyncedCertHashAnnotation] = hash
-			ann["haproxy.operator/last-synced-cert-time"] = time.Now().Format(time.RFC3339)
-		}); perr != nil && !errors.IsConflict(perr) {
-			return changed, fmt.Errorf("record cert sync state: %w", perr)
+	if r.certSyncHashes == nil {
+		r.certSyncHashes = map[string]string{}
+	}
+	r.certSyncHashes[secret.Name] = hash
+	if stateSecret != nil && (changed || state[secret.Name].Hash != hash) {
+		state[secret.Name] = certSyncEntry{Hash: hash, Time: time.Now().Format(time.RFC3339)}
+		raw, merr := json.Marshal(state)
+		if merr == nil {
+			if perr := r.patchAnnotations(ctx, stateSecret, func(ann map[string]string) {
+				ann[CertSyncAnnotation] = string(raw)
+			}); perr != nil && !errors.IsConflict(perr) {
+				return changed, fmt.Errorf("record cert sync state: %w", perr)
+			}
 		}
 	}
 	log.FromContext(ctx).Info("certificate secret synced", "secret", secret.Name, "storage", storageName, "changed", changed)

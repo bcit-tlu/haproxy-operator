@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bcit-tlu/haproxy-operator/internal/config"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -63,7 +65,8 @@ type storageDataplane struct {
 	server        *httptest.Server
 	certStatus    int // code returned by storage PUT/POST (0 = 201/200)
 	order         []string
-	storage       map[string]bool
+	storage       map[string]string // storage object name → pushed leaf serial
+	liveConfig    string            // served by GET /configuration/raw
 	validateCalls int
 	applyCalls    int
 }
@@ -71,7 +74,7 @@ type storageDataplane struct {
 const storagePrefix = "/services/haproxy/storage/ssl_certificates"
 
 func newStorageDataplane(t *testing.T) *storageDataplane {
-	fd := &storageDataplane{storage: map[string]bool{}}
+	fd := &storageDataplane{storage: map[string]string{}}
 	fd.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/configuration/version"):
@@ -81,15 +84,15 @@ func newStorageDataplane(t *testing.T) *storageDataplane {
 			fd.order = append(fd.order, "cert:"+r.Method)
 			switch r.Method {
 			case http.MethodGet:
-				if fd.storage[r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]] {
+				if serial, ok := fd.storage[r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]]; ok {
 					w.Header().Set("Content-Type", "application/json")
-					fmt.Fprint(w, `{"serial":"0"}`)
+					fmt.Fprintf(w, `{"serial":%q}`, serial)
 					return
 				}
 				w.WriteHeader(http.StatusNotFound)
 			case http.MethodPost:
-				if hdr, err := multipartFileName(r); err == nil {
-					fd.storage[hdr] = true
+				if name, serial, err := multipartCert(r); err == nil {
+					fd.storage[name] = serial
 				}
 				if fd.certStatus != 0 {
 					w.WriteHeader(fd.certStatus)
@@ -103,6 +106,9 @@ func newStorageDataplane(t *testing.T) *storageDataplane {
 				}
 				w.WriteHeader(http.StatusOK)
 			}
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/configuration/raw"):
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, fd.liveConfig)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/configuration/raw"):
 			if r.URL.Query().Get("only_validate") == "true" {
 				fd.order = append(fd.order, "validate")
@@ -112,6 +118,8 @@ func newStorageDataplane(t *testing.T) *storageDataplane {
 			}
 			fd.order = append(fd.order, "apply")
 			fd.applyCalls++
+			b, _ := io.ReadAll(r.Body)
+			fd.liveConfig = string(b)
 			w.WriteHeader(http.StatusAccepted)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -121,12 +129,26 @@ func newStorageDataplane(t *testing.T) *storageDataplane {
 	return fd
 }
 
-func multipartFileName(r *http.Request) (string, error) {
-	_, hdr, err := r.FormFile("file_upload")
+// multipartCert returns the uploaded file's storage name and leaf serial.
+func multipartCert(r *http.Request) (name, serial string, err error) {
+	f, hdr, err := r.FormFile("file_upload")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return hdr.Filename, nil
+	defer f.Close()
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return "", "", err
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return "", "", fmt.Errorf("no PEM block")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", "", err
+	}
+	return hdr.Filename, cert.SerialNumber.String(), nil
 }
 
 func TestCertPEMBundle(t *testing.T) {
@@ -166,7 +188,7 @@ func TestReconcileConfigPushesCertsBeforeValidate(t *testing.T) {
 	if fmt.Sprint(fd.order) != fmt.Sprint(want) {
 		t.Errorf("call order = %v, want %v", fd.order, want)
 	}
-	if !fd.storage["star-ltc.pem"] {
+	if fd.storage["star-ltc.pem"] == "" {
 		t.Error("cert never reached storage")
 	}
 }
@@ -191,12 +213,61 @@ func TestReconcileCertSecretFallsThroughToConfig(t *testing.T) {
 		t.Errorf("config reconcile did not follow cert sync: validate=%d apply=%d", fd.validateCalls, fd.applyCalls)
 	}
 
+	// The TLS Secret is VSO-owned — the operator must not annotate it.
 	s := &corev1.Secret{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "haproxy-operator", Name: "star-ltc"}, s); err != nil {
 		t.Fatal(err)
 	}
-	if s.Annotations[LastSyncedCertHashAnnotation] == "" {
-		t.Error("cert secret missing last-synced hash annotation")
+	for k := range s.Annotations {
+		if strings.HasPrefix(k, "haproxy.operator/") {
+			t.Errorf("operator annotation %q written to a VSO-owned TLS Secret", k)
+		}
+	}
+
+	// Sync state lives on the config Secret as a JSON map instead.
+	cfg := &corev1.Secret{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "haproxy-operator", Name: "haproxy-config"}, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if certSyncState(cfg)["star-ltc"].Hash == "" {
+		t.Error("cert-sync state missing from the config Secret annotation")
+	}
+}
+
+func TestCertSyncSkipsRepushAfterRestart(t *testing.T) {
+	crt, key := testBundlePEM(t)
+	fd := newStorageDataplane(t)
+	r, c := newTestReconciler(t, fd.server.URL+"/v3", configSecret(nil), tlsSecret("star-ltc", crt, key))
+	r.CertsSecretNames = []string{"star-ltc"}
+
+	// First reconcile pushes the cert and records state on the config Secret.
+	reconcileOnce(t, r)
+	pushes := 0
+	for _, op := range fd.order {
+		if op == "cert:POST" {
+			pushes++
+		}
+	}
+	if pushes != 1 {
+		t.Fatalf("expected the initial push, order=%v", fd.order)
+	}
+	before := len(fd.order)
+
+	// A fresh reconciler (simulated restart) sharing the same API state must
+	// skip the push: remote serial matches AND the config Secret's cert-sync
+	// annotation still holds the bundle hash.
+	r2, _ := newTestReconciler(t, fd.server.URL+"/v3")
+	r2.Client = c
+	r2.CertsSecretNames = []string{"star-ltc"}
+	if _, err := r2.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Namespace: "haproxy-operator", Name: "star-ltc"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range fd.order[before:] {
+		if op == "cert:POST" || op == "cert:PUT" {
+			t.Errorf("unchanged cert was re-pushed after restart: %v", fd.order[before:])
+		}
 	}
 }
 
@@ -222,5 +293,63 @@ func TestCertSyncFailureIsTransientAndSkipsConfig(t *testing.T) {
 	}
 	if _, ok := s.Annotations[LastFailedHashAnnotation]; ok {
 		t.Error("cert failure must never mark the config hash rejected")
+	}
+}
+
+func TestCertSyncStateDecoder(t *testing.T) {
+	t.Run("nil secret", func(t *testing.T) {
+		if got := certSyncState(nil); len(got) != 0 {
+			t.Errorf("nil secret: got %v, want empty map", got)
+		}
+	})
+	t.Run("missing annotation", func(t *testing.T) {
+		if got := certSyncState(&corev1.Secret{}); len(got) != 0 {
+			t.Errorf("missing annotation: got %v, want empty map", got)
+		}
+	})
+	t.Run("malformed JSON", func(t *testing.T) {
+		s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{CertSyncAnnotation: "{not-json"},
+		}}
+		if got := certSyncState(s); len(got) != 0 {
+			t.Errorf("malformed: got %v, want empty map", got)
+		}
+	})
+	t.Run("multiple entries", func(t *testing.T) {
+		s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{CertSyncAnnotation: `{"a.pem":{"hash":"h1","time":"t1"},"b.pem":{"hash":"h2","time":"t2"}}`},
+		}}
+		got := certSyncState(s)
+		if len(got) != 2 || got["a.pem"].Hash != "h1" || got["b.pem"].Time != "t2" {
+			t.Errorf("decoded = %+v", got)
+		}
+	})
+}
+
+// A recovered cert sync must clear a stale CertSync* failure status on the
+// config Secret even when the config reconcile exits early on unchanged
+// bytes — otherwise the Secret reports an outage that no longer exists.
+func TestCertSyncRecoveryClearsStaleStatus(t *testing.T) {
+	crt, key := testBundlePEM(t)
+	fd := newStorageDataplane(t)
+	cfg := configSecret(nil)
+	cfg.Annotations = map[string]string{}
+	cfg.Annotations[LastAppliedHashAnnotation] = config.HashBytes(cfg.Data["haproxy.cfg"])
+	cfg.Annotations[StatusAnnotation] = "CertSyncConnectionError"
+	cfg.Annotations[StatusMessageAnnotation] = "push cert: connection refused"
+	r, c := newTestReconciler(t, fd.server.URL+"/v3", cfg, tlsSecret("star-ltc", crt, key))
+	r.CertsSecretNames = []string{"star-ltc"}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Namespace: "haproxy-operator", Name: "star-ltc"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := getSecret(t, c)
+	if got := out.Annotations[StatusAnnotation]; got != "Applied" {
+		t.Errorf("status = %q, want Applied after recovered cert sync", got)
+	}
+	if _, ok := out.Annotations[StatusMessageAnnotation]; ok {
+		t.Error("stale status-message survived the recovered cert sync")
 	}
 }

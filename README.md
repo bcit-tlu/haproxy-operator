@@ -106,6 +106,8 @@ When SPIRE is not enabled, the operator mounts TLS certificates from a Kubernete
 
 `--certs-secret-names` lists `kubernetes.io/tls` Secrets (same watch namespace, e.g. VSO-synced from a Vault KV path) whose `tls.crt` + `tls.key` (+ optional `ca.crt` chain) are pushed to the gateway's Dataplane `ssl_certificates` storage as `<secret-name>.pem`. Syncs run before every config validation so a `haproxy.cfg` may safely reference `crt <ssl_certs_dir>/<name>.pem`, and secret updates trigger a reload via the storage API even when the config is unchanged. Requires the Dataplane API to have `ssl_certs_dir` configured.
 
+TLS Secrets stay strictly read-only for the operator — sync bookkeeping (`haproxy.operator/cert-sync`, a per-cert `{hash,time}` JSON map) is recorded on the config Secret, and the chart's RBAC confines Secret `update`/`patch` to that object. A re-push is skipped when the remote leaf serial and size match *and* the recorded bundle hash still matches; a restart falls back to the annotation (or, worst case, one extra GET+push cycle).
+
 ## Project Structure
 
 ```
