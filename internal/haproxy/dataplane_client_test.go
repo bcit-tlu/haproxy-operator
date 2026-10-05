@@ -616,3 +616,43 @@ func TestSyncSSLCertificate(t *testing.T) {
 		}
 	})
 }
+
+func TestGetRawConfiguration(t *testing.T) {
+	const body = "global\n  daemon\n\ndefaults\n  mode http\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/services/haproxy/configuration/raw" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := c.GetRawConfiguration(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if raw != body {
+		t.Errorf("raw = %q, want %q", raw, body)
+	}
+}
+
+func TestGetRawConfigurationError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(APIConfig{BaseURL: srv.URL + "/v3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetRawConfiguration(context.Background()); err == nil {
+		t.Fatal("expected error on non-2xx response, got nil")
+	}
+}

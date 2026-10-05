@@ -73,6 +73,9 @@ spec:
             {{- if .Values.leaderElection.enabled }}
             - --leader-elect=true
             {{- end }}
+            {{- if not .Values.controller.driftRemediate }}
+            - --drift-remediate=false
+            {{- end }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --health-probe-bind-address=:{{ .Values.probes.port }}
           {{- if $authSecret }}

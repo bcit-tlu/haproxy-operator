@@ -26,6 +26,9 @@ const (
 	ConfigUnchanged  = "ConfigUnchanged"
 	CertSynced       = "CertSynced"
 	CertSyncFailed   = "CertSyncFailed"
+	// ConfigDrift fires when the gateway's live raw config no longer matches
+	// the config observed after the last successful apply.
+	ConfigDrift = "ConfigDrift"
 )
 
 // warningReasons are emitted as Warning events; everything else is Normal.
@@ -39,6 +42,7 @@ var warningReasons = map[string]bool{
 	ConflictError:    true,
 	TransientError:   true,
 	CertSyncFailed:   true,
+	ConfigDrift:      true,
 }
 
 // maxEventMessage bounds the message written into an Event. Dataplane

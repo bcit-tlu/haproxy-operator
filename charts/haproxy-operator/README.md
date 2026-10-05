@@ -67,13 +67,30 @@ new connections without a pod restart. The `vaultPKI` source also sets
 `rolloutRestartTargets` so an issuer rotation restarts the deployment
 outright.
 
+## Live drift detection (`controller.driftRemediate`)
+
+On every periodic requeue (default 5m) the operator re-reads the gateway's
+raw config and compares it against the config observed immediately after
+the last successful apply (`haproxy.operator/last-observed-hash` — the
+post-apply read-back, so Dataplane's normalization can't false-positive).
+A mismatch is live drift:
+
+- a `ConfigDrift` **Warning** Event on the config Secret
+- `haproxy_operator_config_drift_total{secret}` increments and
+  `haproxy_operator_config_in_sync{secret}` drops to 0
+- with the default `controller.driftRemediate: true` the desired config is
+  re-validated and re-applied through the normal transaction path — unless
+  the desired bytes are already suppressed by `last-failed-hash`, in which
+  case the Event explains why nothing is pushed.
+
+Set `controller.driftRemediate: false` for alert-only mode: drift is still
+detected and reported, but nothing is re-applied.
+
 ## Migration note (vault#69 — dedicated client CA)
 
-Today the client certificate and the gateway server certificate share the
-`pki-haproxy` intermediate, so pointing `caCertPath` at a key inside the
-client-cert Secret happens to work. Once
-[bcit-tlu/vault#69](https://github.com/bcit-tlu/vault/issues/69) issues the
-operator client cert from a dedicated client CA, that Secret will carry the
-wrong trust anchor — always configure `dataplane.serverCA` (or rely on the
-`vaultPKI` default) rather than deriving server trust from the client
+Client certificates are now issued from the dedicated `pki-haproxy-clients`
+mount ([bcit-tlu/vault#69](https://github.com/bcit-tlu/vault/issues/69)) —
+the client-cert Secret no longer carries a key that can verify the
+gateway's server cert. Always configure `dataplane.serverCA` (or rely on
+the `vaultPKI` default) rather than deriving server trust from the client
 Secret.

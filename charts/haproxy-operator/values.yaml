@@ -24,6 +24,14 @@ secretKey: haproxy.cfg
 # Rotation propagates automatically on the next VSO refresh.
 certsSecretNames: []
 
+# Controller behaviour.
+controller:
+  # Re-apply the desired config when the periodic (5m) requeue finds the
+  # gateway's live config has drifted out-of-band. Drift is always detected
+  # and reported (haproxy_operator_config_in_sync + a ConfigDrift Event);
+  # false turns remediation off — alert-only mode.
+  driftRemediate: true
+
 # HAProxy Dataplane API connection.
 dataplane:
   url: "https://haproxy:5555/v3"

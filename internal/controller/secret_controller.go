@@ -32,6 +32,18 @@ const (
 	// LastAppliedHashAnnotation stores the SHA256 of the last successfully applied config.
 	LastAppliedHashAnnotation = "haproxy.operator/last-applied-hash"
 
+	// observedHashPending marks LastObservedHashAnnotation when the
+	// post-apply read-back failed: no verified baseline exists yet, so the
+	// next successful live read establishes it rather than comparing
+	// against the unverified desired-bytes hash.
+	observedHashPending = "pending"
+
+	// LastObservedHashAnnotation stores the SHA256 of the raw config as read
+	// back from the gateway immediately after the last successful apply.
+	// Dataplane may normalize a submission, so drift detection compares the
+	// live read against this — not against the desired bytes.
+	LastObservedHashAnnotation = "haproxy.operator/last-observed-hash"
+
 	// LastFailedHashAnnotation stores the SHA256 of the last config that was
 	// deterministically rejected by the Dataplane API, so the reconciler
 	// skips re-validation until the config changes. It is ONLY set for
@@ -137,6 +149,12 @@ type SecretReconciler struct {
 	spireSource *workloadapi.X509Source
 	clientMu    sync.Mutex
 	clientReady bool
+	// DriftRemediate controls what happens when the periodic requeue finds
+	// the gateway's live config diverged from the last-observed applied
+	// config: true re-applies the desired config; false only records the
+	// drift Event and metrics (alert-only mode).
+	DriftRemediate bool
+
 	// transientFailures counts consecutive retryable failures to drive
 	// bounded backoff. Reset on success, deterministic rejection, or when
 	// the desired bytes change.
@@ -224,9 +242,103 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	lastAppliedHash := secret.Annotations[LastAppliedHashAnnotation]
 
 	if currentHash == lastAppliedHash {
-		log.Info("configuration unchanged, skipping reconciliation")
+		// The desired bytes are unchanged — but the gateway's live config
+		// may have drifted out-of-band (manual dataplaneapi writes, a
+		// backup restore, a re-imaged gateway's bootstrap config). Compare
+		// the raw config Dataplane serves against the config observed
+		// immediately after the last successful apply; Dataplane may
+		// normalize a submission, so the applied-bytes hash is only the
+		// fallback for Secrets that predate last-observed-hash.
+		haproxyClient, err := r.getOrCreateClient(ctx)
+		if err != nil {
+			log.Error(err, "failed to create dataplane client")
+			class := haproxy.Classify(err)
+			metrics.TransientErrors.WithLabelValues(string(class)).Inc()
+			if uerr := r.failWithStatus(ctx, secret, class.StatusValue(), err.Error()); uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+			r.transientFailures++
+			return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
+		}
+
+		liveRaw, err := haproxyClient.GetRawConfiguration(ctx)
+		if err != nil {
+			class := haproxy.Classify(err)
+			log.Error(err, "live config read failed", "class", string(class))
+			metrics.TransientErrors.WithLabelValues(string(class)).Inc()
+			status.EmitEvent(r.Recorder, secret, eventReasonForClass(class), err.Error())
+			if uerr := r.failWithStatus(ctx, secret, "DriftCheck"+class.StatusValue(), err.Error()); uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+			r.transientFailures++
+			return ctrl.Result{RequeueAfter: backoffForFailure(r.transientFailures)}, nil
+		}
+
+		// Successful live read — reset the transient-failure backoff (a
+		// failure resets it too, but only after counting up, so repeated
+		// check failures keep backing off rather than polling every
+		// baseRetryInterval).
 		r.transientFailures = 0
-		return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		liveHash := config.HashBytes([]byte(liveRaw))
+
+		expectedHash := secret.Annotations[LastObservedHashAnnotation]
+		if expectedHash == observedHashPending {
+			// A prior apply's read-back failed before a baseline could be
+			// recorded. The just-read live bytes are the first verified
+			// observation since that apply — adopt them as the baseline
+			// rather than comparing against the unverified desired hash
+			// (Dataplane may normalize submissions, so live bytes can
+			// legitimately differ from what was posted).
+			if uerr := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
+				ann[LastObservedHashAnnotation] = liveHash
+				ann[StatusAnnotation] = "Applied"
+				delete(ann, StatusMessageAnnotation)
+			}); uerr != nil {
+				log.Error(uerr, "failed to record observed baseline")
+			}
+			metrics.ConfigInSync.WithLabelValues(secret.Name).Set(1)
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		}
+		if expectedHash == "" {
+			expectedHash = lastAppliedHash
+		}
+		if liveHash == expectedHash {
+			metrics.ConfigInSync.WithLabelValues(secret.Name).Set(1)
+			// A recovered check must not leave a stale DriftCheck failure
+			// status behind — clear it, preserving unrelated statuses.
+			if strings.HasPrefix(secret.Annotations[StatusAnnotation], "DriftCheck") {
+				if uerr := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
+					ann[StatusAnnotation] = "Applied"
+					delete(ann, StatusMessageAnnotation)
+				}); uerr != nil {
+					log.Error(uerr, "failed to clear stale drift-check status")
+				}
+			}
+			log.Info("configuration unchanged, live config in sync")
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		}
+
+		metrics.ConfigDrift.WithLabelValues(secret.Name).Inc()
+		metrics.ConfigInSync.WithLabelValues(secret.Name).Set(0)
+		switch {
+		case currentHash == secret.Annotations[LastFailedHashAnnotation]:
+			status.EmitEvent(r.Recorder, secret, status.ConfigDrift,
+				"live configuration drifted from the applied config, but the desired config is suppressed (its last apply was rejected); not re-applying")
+			log.Info("live config drifted; desired config suppressed after a prior rejection — not re-applying")
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		case !r.DriftRemediate:
+			status.EmitEvent(r.Recorder, secret, status.ConfigDrift,
+				"live configuration drifted from the applied config; re-apply disabled (drift-remediate=false)")
+			log.Info("live config drift detected, remediation disabled")
+			return ctrl.Result{RequeueAfter: RequeueInterval}, nil
+		default:
+			status.EmitEvent(r.Recorder, secret, status.ConfigDrift,
+				"live configuration drifted from the applied config; re-applying the desired config")
+			log.Info("live config drift detected, re-applying desired configuration")
+		}
+		// Fall through to the normal validate/apply path — desired bytes are
+		// unchanged, so the lastDesiredHash reset is a no-op and the
+		// LastFailedHash case was handled above.
 	}
 
 	// New desired bytes reset the transient-failure streak — they were never
@@ -344,11 +456,23 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	metrics.ReconcileResults.WithLabelValues("applied").Inc()
 	r.exportConfigHash(currentHash, "applied")
 	metrics.LastSuccessfulApply.SetToCurrentTime()
+	metrics.ConfigInSync.WithLabelValues(secret.Name).Set(1)
 	r.transientFailures = 0
+
+	// Phase 2.5: Observe the config as stored so the periodic drift check
+	// compares like-for-like — Dataplane may normalize the submission.
+	observedHash := ""
+	if liveRaw, rerr := haproxyClient.GetRawConfiguration(ctx); rerr == nil {
+		observedHash = config.HashBytes([]byte(liveRaw))
+	} else {
+		log.Info("applied config could not be read back; marking baseline unverified until the next live read", "error", rerr)
+		observedHash = observedHashPending
+	}
 
 	// Phase 3: Record the applied hash and clear stale failure state.
 	if err := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
 		ann[LastAppliedHashAnnotation] = currentHash
+		ann[LastObservedHashAnnotation] = observedHash
 		ann[StatusAnnotation] = "Applied"
 		ann[LastAppliedTimeAnnotation] = time.Now().Format(time.RFC3339)
 		delete(ann, LastFailedHashAnnotation)

@@ -63,6 +63,7 @@ func main() {
 		dataplaneUsername    string
 		dataplanePassword    string
 		dataplaneInsecure    bool
+		driftRemediate       bool
 		spireSocketPath      string
 	)
 
@@ -94,6 +95,8 @@ func main() {
 	flag.StringVar(&dataplaneUsername, "dataplane-username", envOr("DATAPLANE_USERNAME", ""), "Data Plane API basic auth username")
 	flag.StringVar(&dataplanePassword, "dataplane-password", envOr("DATAPLANE_PASSWORD", ""), "Data Plane API basic auth password")
 	flag.BoolVar(&dataplaneInsecure, "dataplane-insecure", envOr("DATAPLANE_INSECURE", "") == "true", "Skip Data Plane API TLS verification (not recommended)")
+	flag.BoolVar(&driftRemediate, "drift-remediate", envOr("DRIFT_REMEDIATE", "true") == "true",
+		"Re-apply the desired config when the periodic requeue finds the gateway's live config has drifted; when false, drift is still detected, metered, and reported via Events")
 	flag.StringVar(&spireSocketPath, "spire-socket", envOr("SPIRE_AGENT_SOCKET", ""), "SPIRE Agent Workload API socket path (unix:///run/spire/agent.sock)")
 
 	opts := zap.Options{
@@ -198,6 +201,7 @@ func main() {
 		SecretName:      secretName,
 		SecretKey:       secretKey,
 		SpireSocketPath: spireSocketPath,
+		DriftRemediate:  driftRemediate,
 		CertsSecretNames: func() []string {
 			var out []string
 			for _, n := range strings.Split(certsSecretNames, ",") {
