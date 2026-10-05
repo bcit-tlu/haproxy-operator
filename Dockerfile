@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1.6
 
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM golang:1.22-alpine AS builder
+# GO_VERSION must track the `go` directive in go.mod; CI passes it as a build
+# arg sourced from go.mod so the toolchain stays single-sourced.
+ARG GO_VERSION=1.25
+FROM golang:${GO_VERSION}-alpine AS builder
 
 WORKDIR /workspace
 

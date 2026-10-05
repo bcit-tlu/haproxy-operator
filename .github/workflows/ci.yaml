@@ -46,6 +46,17 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+  # The Docker build takes its Go toolchain from go.mod via the GO_VERSION
+  # build arg, so the `go` directive stays the single source of truth.
+  go-version:
+    runs-on: ubuntu-latest
+    outputs:
+      go_version: ${{ steps.gv.outputs.go_version }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: gv
+        run: echo "go_version=$(awk '/^go /{print $2}' go.mod)" >> "$GITHUB_OUTPUT"
+
   helm-lint:
     runs-on: ubuntu-latest
     steps:
@@ -84,7 +95,7 @@ jobs:
   # blocking image builds.
 
   build-haproxy-operator:
-    needs: [go-test]
+    needs: [go-test, go-version]
     uses: bcit-tlu/.github/.github/workflows/oci-build.yaml@main
     permissions:
       contents: read
@@ -97,6 +108,7 @@ jobs:
       image_name: haproxy-operator
       context: .
       tag_prefix: "v"
+      build_args: GO_VERSION=${{ needs.go-version.outputs.go_version }}
     secrets: inherit
 
   # ── Chart publish (rc) ─────────────────────────────────
