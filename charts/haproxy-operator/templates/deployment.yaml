@@ -62,7 +62,7 @@ spec:
             - --certs-secret-names={{ join "," .Values.certsSecretNames }}
             {{- end }}
             - --dataplane-url={{ .Values.dataplane.url }}
-                        {{- if .Values.dataplane.insecure }}
+            {{- if .Values.dataplane.insecure }}
             - --dataplane-insecure=true
             {{- end }}
             {{- if not .Values.spire.enabled }}
