@@ -216,6 +216,18 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		req = ctrl.Request{NamespacedName: client.ObjectKey{Namespace: req.Namespace, Name: r.SecretName}}
 		secret = cfgSecret
+		// A recovered cert sync must not leave a stale CertSync failure
+		// status on the config Secret — the unchanged-config return below
+		// would keep reporting an outage that no longer exists. Only clear
+		// CertSync-prefixed statuses; unrelated config failures are kept.
+		if strings.HasPrefix(secret.Annotations[StatusAnnotation], "CertSync") {
+			if uerr := r.patchAnnotations(ctx, secret, func(ann map[string]string) {
+				ann[StatusAnnotation] = "Applied"
+				delete(ann, StatusMessageAnnotation)
+			}); uerr != nil {
+				log.Error(uerr, "failed to clear stale cert-sync status")
+			}
+		}
 		// The cert payload changed the validation context: a cfg previously
 		// rejected for a missing crt file may now pass. Clear the in-memory
 		// suppression (the outcome re-marks it if it still fails).

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bcit-tlu/haproxy-operator/internal/config"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -292,5 +293,63 @@ func TestCertSyncFailureIsTransientAndSkipsConfig(t *testing.T) {
 	}
 	if _, ok := s.Annotations[LastFailedHashAnnotation]; ok {
 		t.Error("cert failure must never mark the config hash rejected")
+	}
+}
+
+func TestCertSyncStateDecoder(t *testing.T) {
+	t.Run("nil secret", func(t *testing.T) {
+		if got := certSyncState(nil); len(got) != 0 {
+			t.Errorf("nil secret: got %v, want empty map", got)
+		}
+	})
+	t.Run("missing annotation", func(t *testing.T) {
+		if got := certSyncState(&corev1.Secret{}); len(got) != 0 {
+			t.Errorf("missing annotation: got %v, want empty map", got)
+		}
+	})
+	t.Run("malformed JSON", func(t *testing.T) {
+		s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{CertSyncAnnotation: "{not-json"},
+		}}
+		if got := certSyncState(s); len(got) != 0 {
+			t.Errorf("malformed: got %v, want empty map", got)
+		}
+	})
+	t.Run("multiple entries", func(t *testing.T) {
+		s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{CertSyncAnnotation: `{"a.pem":{"hash":"h1","time":"t1"},"b.pem":{"hash":"h2","time":"t2"}}`},
+		}}
+		got := certSyncState(s)
+		if len(got) != 2 || got["a.pem"].Hash != "h1" || got["b.pem"].Time != "t2" {
+			t.Errorf("decoded = %+v", got)
+		}
+	})
+}
+
+// A recovered cert sync must clear a stale CertSync* failure status on the
+// config Secret even when the config reconcile exits early on unchanged
+// bytes — otherwise the Secret reports an outage that no longer exists.
+func TestCertSyncRecoveryClearsStaleStatus(t *testing.T) {
+	crt, key := testBundlePEM(t)
+	fd := newStorageDataplane(t)
+	cfg := configSecret(nil)
+	cfg.Annotations = map[string]string{}
+	cfg.Annotations[LastAppliedHashAnnotation] = config.HashBytes(cfg.Data["haproxy.cfg"])
+	cfg.Annotations[StatusAnnotation] = "CertSyncConnectionError"
+	cfg.Annotations[StatusMessageAnnotation] = "push cert: connection refused"
+	r, c := newTestReconciler(t, fd.server.URL+"/v3", cfg, tlsSecret("star-ltc", crt, key))
+	r.CertsSecretNames = []string{"star-ltc"}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Namespace: "haproxy-operator", Name: "star-ltc"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := getSecret(t, c)
+	if got := out.Annotations[StatusAnnotation]; got != "Applied" {
+		t.Errorf("status = %q, want Applied after recovered cert sync", got)
+	}
+	if _, ok := out.Annotations[StatusMessageAnnotation]; ok {
+		t.Error("stale status-message survived the recovered cert sync")
 	}
 }
