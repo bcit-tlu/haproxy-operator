@@ -53,6 +53,20 @@ dataplane:
 `serverCA` is ignored entirely when `spire.enabled` (SPIFFE bundles carry
 both directions).
 
+**Interaction with `dataplane.caCertPath`:** the managed volume always
+projects the CA as `/etc/haproxy-operator/server-ca/ca.crt` (the
+`caCertPath` default). Pointing `caCertPath` anywhere else without an
+explicit `serverCA` source keeps the legacy behavior — no `server-ca`
+volume is created and the path must be backed by your own mount (e.g. a
+key inside the TLS Secret) — while an *explicit* source combined with a
+mismatched `caCertPath` fails at template time.
+
+**Rotation:** the operator rebuilds its trust pool from the CA file on
+every TLS handshake, so Secret/ConfigMap source rotations take effect on
+new connections without a pod restart. The `vaultPKI` source also sets
+`rolloutRestartTargets` so an issuer rotation restarts the deployment
+outright.
+
 ## Migration note (vault#69 — dedicated client CA)
 
 Today the client certificate and the gateway server certificate share the

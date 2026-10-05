@@ -13,6 +13,9 @@
 {{- if not .Values.spire.enabled }}
 {{- $serverCAKind = include "haproxy-operator.serverCAKind" . }}
 {{- end }}
+{{- if and (include "haproxy-operator.serverCAExplicit" .) (ne .Values.dataplane.caCertPath "/etc/haproxy-operator/server-ca/ca.crt") }}
+{{- fail "a configured dataplane.serverCA source mounts the CA at /etc/haproxy-operator/server-ca/ca.crt; dataplane.caCertPath points elsewhere" }}
+{{- end }}
 {{- /* Effective Basic Auth Secret: explicit dataplane.auth.secretName wins;
      otherwise fall back to the VSO-synced Secret when vault.static is on. */}}
 {{- $authSecret := .Values.dataplane.auth.secretName | default (ternary .Values.vault.static.secretName "" (and .Values.vault.enabled .Values.vault.static.enabled)) }}
@@ -115,9 +118,11 @@ spec:
             - name: tls
               mountPath: /etc/haproxy-operator/tls
               readOnly: true
+            {{- if include "haproxy-operator.serverCAMounted" . }}
             - name: server-ca
               mountPath: /etc/haproxy-operator/server-ca
               readOnly: true
+            {{- end }}
             {{- end }}
             {{- if .Values.spire.enabled }}
             - name: spire-agent-socket
@@ -129,6 +134,7 @@ spec:
         - name: tls
           secret:
             secretName: {{ ternary .Values.vault.pki.secretName .Values.dataplane.tls.existingSecret .Values.vault.enabled }}
+        {{- if include "haproxy-operator.serverCAMounted" . }}
         # Server trust anchor — separate volume so the client-cert Secret and
         # the server CA may come from different issuers (bcit-tlu/vault#69).
         - name: server-ca
@@ -144,6 +150,7 @@ spec:
             items:
               - key: {{ include "haproxy-operator.serverCAKey" . }}
                 path: ca.crt
+          {{- end }}
           {{- end }}
         {{- end }}
         {{- if .Values.spire.enabled }}

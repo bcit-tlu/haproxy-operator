@@ -1,4 +1,4 @@
-{{- if and .Values.vault.enabled (not .Values.spire.enabled) (eq (include "haproxy-operator.serverCAKind" .) "vaultPKI") }}
+{{- if and .Values.vault.enabled (include "haproxy-operator.serverCAMounted" .) (eq (include "haproxy-operator.serverCAKind" .) "vaultPKI") }}
 # VSO VaultDynamicSecret — syncs the Dataplane SERVER trust anchor from
 # <mount>/cert/ca (the issuing intermediate PEM, a plain GET with no lease)
 # into the Secret the deployment mounts as the server-ca volume. This is a

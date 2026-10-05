@@ -352,23 +352,26 @@ func TestServerIssuerOnlyCAFile(t *testing.T) {
 		t.Fatalf("ping with server-issuer CA: %v", err)
 	}
 
-	// A different CA (e.g. a dedicated client issuer) must NOT verify the
-	// gateway — the whole point of a separate serverCA source.
-	otherCA := filepath.Join(dir, "client-ca.crt")
-	if err := os.WriteFile(otherCA, testCertPEM(t, "client issuer"), 0o600); err != nil {
+	// Rotate the file to a different CA (e.g. a dedicated client issuer
+	// under vault#69): the SAME cached client must re-read it on the next
+	// handshake — a static RootCAs pool would keep trusting the old issuer
+	// (Devin Review #47). CloseClientConnections forces a fresh handshake.
+	srv.CloseClientConnections()
+	wrongCA := testCertPEM(t, "client issuer")
+	if err := os.WriteFile(caFile, wrongCA, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c2, err := NewClient(APIConfig{
-		BaseURL:        srv.URL,
-		CACertPath:     otherCA,
-		ClientCertPath: certPath,
-		ClientKeyPath:  keyPath,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := c.Ping(context.Background()); err == nil {
+		t.Fatal("expected ping to fail after the CA file rotated to the wrong issuer")
 	}
-	if err := c2.Ping(context.Background()); err == nil {
-		t.Fatal("expected ping to fail when the CA file holds the wrong issuer")
+
+	// Restoring the right CA verifies the cached client recovers too.
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.CloseClientConnections()
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("ping after CA restore: %v", err)
 	}
 }
 

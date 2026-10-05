@@ -83,6 +83,29 @@ layout that predates this field).
 {{- end }}
 
 {{/*
+Whether a dataplane.serverCA source was explicitly configured.
+*/}}
+{{- define "haproxy-operator.serverCAExplicit" -}}
+{{- $v := .Values.dataplane.serverCA -}}
+{{- if or $v.vaultPKI.enabled $v.configMap.name $v.secretKeyRef.name -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Whether the managed server-ca volume mounts. SPIRE ignores serverCA; an
+explicit source always mounts. With no explicit source the volume only
+exists when caCertPath still defaults into it — a custom caCertPath keeps
+the legacy BYO-file behavior so static installs pointing inside the tls
+volume (or their own mount) keep working (Devin Review #47).
+*/}}
+{{- define "haproxy-operator.serverCAMounted" -}}
+{{- if and (not .Values.spire.enabled) (or (include "haproxy-operator.serverCAExplicit" .) (eq .Values.dataplane.caCertPath "/etc/haproxy-operator/server-ca/ca.crt")) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
 Secret name carrying ca.crt when the server-CA source is a Secret —
 explicit secretKeyRef.name, the vaultPKI destination, or the static
 fallback to dataplane.tls.existingSecret.
