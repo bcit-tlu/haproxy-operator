@@ -103,7 +103,6 @@ var (
 			Help: "1 when the operator runs with --dataplane-insecure (server verification disabled).",
 		},
 	)
-	)
 )
 
 func init() {
