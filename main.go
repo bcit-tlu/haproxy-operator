@@ -151,9 +151,6 @@ func main() {
 		}
 
 		ctx := ctrl.SetupSignalHandler()
-		if dataplaneClientCert != "" {
-			go metrics.StartClientCertWatcher(ctx, dataplaneClientCert, clientCertCheckInterval)
-		}
 		if err := runner.Run(ctx); err != nil && err != context.Canceled {
 			setupLog.Error(err, "local runner exited with error")
 			os.Exit(1)

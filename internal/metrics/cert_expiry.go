@@ -65,9 +65,15 @@ func ObserveClientCertFile(path string) error {
 // disk. Intended to run as a goroutine.
 func StartClientCertWatcher(ctx context.Context, path string, interval time.Duration) {
 	logger := log.FromContext(ctx)
-	if err := ObserveClientCertFile(path); err != nil {
-		logger.Error(err, "observe dataplane client certificate", "path", path)
+	observe := func() {
+		if err := ObserveClientCertFile(path); err != nil {
+			// An unreadable mounted cert is a dead credential — surface it
+			// as expired rather than keeping the last healthy-looking value.
+			DataplaneClientCertExpiry.Set(0)
+			logger.Error(err, "observe dataplane client certificate", "path", path)
+		}
 	}
+	observe()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -75,9 +81,7 @@ func StartClientCertWatcher(ctx context.Context, path string, interval time.Dura
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := ObserveClientCertFile(path); err != nil {
-				logger.Error(err, "observe dataplane client certificate", "path", path)
-			}
+			observe()
 		}
 	}
 }

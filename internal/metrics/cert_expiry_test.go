@@ -99,4 +99,18 @@ func TestStartClientCertWatcherUpdatesOnFileChange(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		got = testutil.ToFloat64(DataplaneClientCertExpiry)
 	}
+
+	// An unreadable file surfaces as 0 (expired) rather than the last
+	// healthy-looking value.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for got := testutil.ToFloat64(DataplaneClientCertExpiry); got != 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("gauge did not zero on unreadable file: got %v", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+		got = testutil.ToFloat64(DataplaneClientCertExpiry)
+	}
 }

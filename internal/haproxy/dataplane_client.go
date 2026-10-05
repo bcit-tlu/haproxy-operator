@@ -92,11 +92,21 @@ func NewClient(cfg APIConfig) (*Client, error) {
 		}
 
 		if cfg.ClientCertPath != "" || cfg.ClientKeyPath != "" {
-			cert, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath)
-			if err != nil {
+			// Validate once at startup so misconfigured mounts fail fast,
+			// then reload the pair on every handshake: VSO rotates the
+			// mounted files in place, and the reconciler caches this client
+			// for the process's life — a static Certificates entry would
+			// pin the first-loaded leaf long after rotation.
+			if _, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath); err != nil {
 				return nil, fmt.Errorf("load dataplane client cert/key: %w", err)
 			}
-			tlsConfig.Certificates = []tls.Certificate{cert}
+			tlsConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				cert, err := tls.LoadX509KeyPair(cfg.ClientCertPath, cfg.ClientKeyPath)
+				if err != nil {
+					return nil, fmt.Errorf("reload dataplane client cert/key: %w", err)
+				}
+				return &cert, nil
+			}
 		}
 
 		transport = &http.Transport{
@@ -357,6 +367,11 @@ func (c *Client) do(ctx context.Context, method, p string, body io.Reader, conte
 	}
 	defer resp.Body.Close()
 
+	// resp.TLS describes this connection's original handshake — a rotated
+	// leaf surfaces here only on the next connect. Dataplane leaf installs
+	// always restart dataplaneapi (dataplane-cert-install), dropping every
+	// pooled connection, so the gauge refreshes on the first post-rotation
+	// request.
 	if ServerCertObserver != nil && resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		ServerCertObserver(c.baseURL.Hostname(), resp.TLS.PeerCertificates[0].NotAfter)
 	}
