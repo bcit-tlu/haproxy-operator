@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.7.0...v0.8.0) (2026-10-05)
+
+
+### Features
+
+* **controller:** detect and remediate live config drift on the periodic requeue ([#49](https://github.com/bcit-tlu/haproxy-operator/issues/49)) ([0a1a6db](https://github.com/bcit-tlu/haproxy-operator/commit/0a1a6db45752a3e1265c6b51b1b934d673010e59))
+
+
+### Bug Fixes
+
+* **chart:** refuse dataplane.insecure together with vault/spire auth modes ([#51](https://github.com/bcit-tlu/haproxy-operator/issues/51)) ([fbe8fa7](https://github.com/bcit-tlu/haproxy-operator/commit/fbe8fa71fcf362f3c2429ff91d84998e14684124))
+
 ## [0.7.0](https://github.com/bcit-tlu/haproxy-operator/compare/v0.6.0...v0.7.0) (2026-10-05)
 
 
