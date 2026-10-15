@@ -359,6 +359,11 @@ func TestReconcileDriftRemediates(t *testing.T) {
 	r, c := newTestReconciler(t, fd.server.URL+"/v3", s)
 	r.DriftRemediate = true
 
+	// The drift counter is shared across the package — other reconciles (e.g.
+	// cert syncs on unchanged config) also hit the drift path — so assert the
+	// delta this reconcile adds rather than an absolute value.
+	driftBefore := testutil.ToFloat64(metrics.ConfigDrift.WithLabelValues("haproxy-config"))
+
 	res := reconcileOnce(t, r)
 	if res.RequeueAfter != RequeueInterval {
 		t.Errorf("expected RequeueInterval after remediation, got %v", res.RequeueAfter)
@@ -366,8 +371,8 @@ func TestReconcileDriftRemediates(t *testing.T) {
 	if fd.applyCalls != 1 {
 		t.Errorf("drifted live config must trigger an apply, apply=%d", fd.applyCalls)
 	}
-	if got := testutil.ToFloat64(metrics.ConfigDrift.WithLabelValues("haproxy-config")); got != 1 {
-		t.Errorf("config_drift_total = %v, want 1", got)
+	if got := testutil.ToFloat64(metrics.ConfigDrift.WithLabelValues("haproxy-config")) - driftBefore; got != 1 {
+		t.Errorf("config_drift_total delta = %v, want 1", got)
 	}
 	// Apply succeeded → the observed hash now pins the stored (applied) bytes.
 	out := getSecret(t, c)
