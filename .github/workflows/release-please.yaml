@@ -28,7 +28,7 @@ jobs:
       # the top-level `release-type` input only accepts the leaf values
       # and must be omitted here so each component's `release-type` from
       # the config drives the per-package strategy.
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: rp
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
