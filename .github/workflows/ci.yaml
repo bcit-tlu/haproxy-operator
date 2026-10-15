@@ -34,7 +34,7 @@ jobs:
   go-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -53,14 +53,14 @@ jobs:
     outputs:
       go_version: ${{ steps.gv.outputs.go_version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: gv
         run: echo "go_version=$(awk '/^go /{print $2}' go.mod)" >> "$GITHUB_OUTPUT"
 
   helm-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: azure/setup-helm@v5
 
@@ -136,7 +136,7 @@ jobs:
     env:
       REGISTRY: ghcr.io
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: azure/setup-helm@v5
         with:
