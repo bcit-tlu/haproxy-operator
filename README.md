@@ -76,6 +76,7 @@ curl http://localhost:8404    # HAProxy stats
 | `--certs-secret-names` / `CERTS_SECRET_NAMES` | — | Comma-separated TLS Secrets pushed to Dataplane `ssl_certificates` storage as `<name>.pem` before config validation |
 | `--drift-remediate` / `DRIFT_REMEDIATE` | `true` | Re-apply the desired config when the live gateway config drifts; `false` = detect + alert only |
 | `--dataplane-url` / `DATAPLANE_URL` | `https://haproxy:5555/v3` | Dataplane API base URL |
+| `--dataplane-insecure` / `DATAPLANE_INSECURE` | `false` | Skip Dataplane TLS verification — **local dev only**. The chart refuses it with `vault.enabled`/`spire.enabled`, and the operator exports `haproxy_operator_dataplane_insecure=1` plus a per-minute Warn while set |
 | `--spire-socket` / `SPIRE_AGENT_SOCKET` | — | SPIRE Workload API socket |
 | `--leader-elect` / `LEADER_ELECT` | `false` | Enable leader election |
 
