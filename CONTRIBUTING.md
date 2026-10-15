@@ -27,3 +27,8 @@ opens one grouped minor/patch PR per ecosystem (`gomod`, `github-actions`,
 - `sigs.k8s.io/controller-runtime`, `k8s.io/api`, `k8s.io/apimachinery`, and
   `k8s.io/client-go` move together; the `k8s.io` minor should track the fleet's
   Kubernetes minor (RKE2 — check `kubectl version` against the clusters).
+  Dependabot ignores `k8s.io/api` directly; it follows `k8s.io/client-go`
+  through Go's minimum version selection. While the fleet is held on
+  Kubernetes 1.35, Dependabot only offers patch updates for `k8s.io/*` and
+  `controller-runtime`; raise the minor by hand (and drop the `ignore` entries)
+  when the clusters upgrade.
