@@ -8,6 +8,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # k8s.io/api is bumped by MVS whenever client-go moves (client-go pins
+    # the matching api minor). Updated on its own, the newer api drops
+    # packages the current client-go still imports, so `go mod tidy` fails
+    # and every weekly run reports dependency_file_not_resolvable.
+    ignore:
+      - dependency-name: k8s.io/api
     groups:
       minor-patch:
         update-types: [minor, patch]
