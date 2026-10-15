@@ -35,6 +35,10 @@ controller:
 # HAProxy Dataplane API connection.
 dataplane:
   url: "https://haproxy:5555/v3"
+  # Disables server verification on the Dataplane TLS connection — exists
+  # ONLY for local kind/dev runs. The chart refuses to render it together
+  # with vault.enabled or spire.enabled, and the operator exports
+  # haproxy_operator_dataplane_insecure=1 while it is set.
   insecure: false
   # Paths inside the pod where static TLS certs are mounted (used when SPIRE is disabled).
   # caCertPath is the SERVER trust anchor — it lives on its own volume so the
