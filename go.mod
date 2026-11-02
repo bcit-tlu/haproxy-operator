@@ -7,9 +7,9 @@ require (
 	github.com/go-logr/logr v1.4.4
 	github.com/prometheus/client_golang v1.25.0
 	github.com/spiffe/go-spiffe/v2 v2.9.0
-	k8s.io/api v0.35.9
-	k8s.io/apimachinery v0.35.9
-	k8s.io/client-go v0.35.9
+	k8s.io/api v0.35.10
+	k8s.io/apimachinery v0.35.10
+	k8s.io/client-go v0.35.10
 	sigs.k8s.io/controller-runtime v0.23.3
 )
 
